@@ -64,6 +64,14 @@ procedure(RBIpcErrHandler(ipcId data)
     RBStderrBuf = strcat(RBStderrBuf data)
     when(strlen(RBStderrBuf) > 8192
         RBStderrBuf = substring(RBStderrBuf strlen(RBStderrBuf)-8191 8192))
+    ; Parse the daemon's startup banner ("[RB-banner] pid=N bind=H:P")
+    ; out of stderr.  Cadence SKILL has no portable shell-output API;
+    ; ipcGetPid is unreliable across IC releases.  This banner is the
+    ; simplest authoritative source for the OS pid the SKILL side can
+    ; use to drive the monitor GUI.
+    when(pcreMatchp("\\[RB-banner\\] pid=([0-9]+) bind=([^ \t\n]+)" data)
+        RBLastPid = atoi(pcreSubstring(1))
+        RBLastBind = pcreSubstring(2))
 )
 
 procedure(RBIpcFinishHandler(ipcId data)
@@ -111,7 +119,7 @@ procedure(RBStart()
 		)
 		printf("[RAMIC Bridge ipc=%L pid=%L] started: bind=%s log=%s at (%s)\n"
 			RBIpc RBLastPid RBLastBind
-			(if(RBDLog "/tmp/RB.log" "off"))
+			if(RBDLog "/tmp/RB.log" "off")
 			getCurrentTime())
 	)
 )
@@ -309,7 +317,7 @@ procedure(RBMRefresh()
 			bind = if(RBLastBind && strlen(RBLastBind) > 0
 				RBLastBind
 				sprintf(nil "%s:%d"
-					(if(RBLocal "127.0.0.1" "0.0.0.0"))
+					if(RBLocal "127.0.0.1" "0.0.0.0")
 					RBPort))
 			RBMonitor->RBMState->value = sprintf(nil
 				"RAMIC Bridge: Running   ipc=%L  pid=%L  bind=%s"

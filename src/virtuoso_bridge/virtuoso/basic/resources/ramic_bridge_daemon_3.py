@@ -219,6 +219,15 @@ def start_server():
                 sys.exit(1)
             raise
         s.listen(1)
+        # Banner — SKILL side parses this from stderr to populate
+        # RBLastPid / RBLastBind for the monitor display.  Format is
+        # frozen: "[RB-banner] pid=<n> bind=<host>:<port>".
+        sys.stderr.write(
+            "[RB-banner] pid={pid} bind={host}:{port}\n".format(
+                pid=os.getpid(), host=HOST, port=PORT,
+            )
+        )
+        sys.stderr.flush()
         while True:
             conn, addr = s.accept()
             try:
