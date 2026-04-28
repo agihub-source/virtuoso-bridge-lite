@@ -575,8 +575,12 @@ class SSHRunner:
 
     def _run_command_once(self, command: str, timeout: int | None = None) -> CommandResult:
         effective_timeout = timeout or self._timeout
-        # Pipe the command to `ssh host sh` via stdin so it always runs in sh
-        # regardless of the remote user's login shell (which may be csh).
+        # Pipe the command to `ssh host sh -l` via stdin so it always runs in
+        # a POSIX login shell regardless of the remote user's login shell
+        # (which may be csh).  Using -l (login) sources /etc/profile and
+        # ~/.profile, making tools like python3 visible via PATH.  sh -l only
+        # reads sh-syntax profiles, never ~/.cshrc, so existing csh users are
+        # unaffected.
         # Passing the command as an SSH argument would have the login shell
         # interpret it, breaking sh syntax (&&, ${VAR:-}, etc.) if login=csh.
         logger.info("[server] %s", command)
@@ -599,7 +603,7 @@ class SSHRunner:
         attempts = 3
         last: subprocess.CompletedProcess[bytes] | None = None
         for attempt in range(attempts):
-            cmd = self._build_ssh_base() + ["sh"]
+            cmd = self._build_ssh_base() + ["sh", "-l"]
             self._print_cmd(cmd)
             last = subprocess.run(
                 cmd,
@@ -920,7 +924,7 @@ class SSHRunner:
                 return
 
             self._close_persistent_shell_locked()
-            cmd = self._build_ssh_base() + ["sh", "-s"]
+            cmd = self._build_ssh_base() + ["sh", "-l", "-s"]
             logger.info("Starting persistent SSH shell: %s", " ".join(cmd))
             self._print_cmd(cmd)
             proc = subprocess.Popen(
