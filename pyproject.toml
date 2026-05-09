@@ -18,9 +18,12 @@ dependencies = [
 # Microsoft Visio via COM, Windows-only.  The pure model layer in
 # `virtuoso/visio.py` has no extra deps and stays importable everywhere.
 visio = ["pywin32; sys_platform == 'win32'"]
+# MCP server (`virtuoso-bridge-mcp init` + `python -m virtuoso_bridge.mcp`)
+mcp = ["mcp>=1.0"]
 
 [project.scripts]
 virtuoso-bridge = "virtuoso_bridge.cli:main"
+virtuoso-bridge-mcp = "virtuoso_bridge.mcp.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -29,3 +32,4 @@ where = ["src"]
 "virtuoso_bridge.resources" = [".env_template"]
 "virtuoso_bridge.virtuoso.basic.resources" = ["*.il", "*.py"]
 "virtuoso_bridge.virtuoso.maestro" = ["*.yaml"]
+"virtuoso_bridge.mcp.resources" = ["*.il"]
