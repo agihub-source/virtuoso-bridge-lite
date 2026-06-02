@@ -272,6 +272,8 @@ virtuoso-bridge profile clear --venv         # remove active venv's profile bind
 virtuoso-bridge load FILE.il    # run a .il file in Virtuoso (uploads in SSH mode)
 virtuoso-bridge eval 'EXPR'     # run inline SKILL expression
 virtuoso-bridge eval --stdin    # multi-line SKILL via stdin (auto-wrapped in progn)
+virtuoso-bridge lint FILE.il    # structural lint (parens/strings/comments), offline
+virtuoso-bridge lint FILE.il --deep  # also run Cadence sklint on the live daemon
 virtuoso-bridge windows         # list all open Virtuoso windows + focused session
 virtuoso-bridge snapshot        # focused maestro: 4 SKILL probe sections to stdout
 virtuoso-bridge snapshot -o ROOT  # full disk dump (raw + filtered XMLs + per-point run files)

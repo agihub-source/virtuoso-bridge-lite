@@ -132,6 +132,7 @@ All commands take `-p PROFILE` / `--env PATH` to pick a non-default config; run 
 | **SKILL execution** | |
 | `load FILE.il` | Run a `.il` file in Virtuoso (uploads it in SSH mode). VS Code task–friendly; outputs `VirtuosoResult` JSON |
 | `eval 'EXPR'` / `eval --stdin` | Run an inline SKILL expression; supports multi-statement via auto-wrapped `progn(...)` |
+| `lint FILE.il` / `lint --deep` | Structural lint (balanced parens, terminated strings — offline); `--deep` also runs Cadence `sklint` on the daemon |
 | **Interaction / diagnostics** | |
 | `windows` | List all open Virtuoso windows (number + name) |
 | `screenshot [ciw\|current\|N]` | Capture a window to `output/` |

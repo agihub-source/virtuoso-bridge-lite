@@ -851,6 +851,49 @@ def cli_eval(*, skill: str | None, stdin: bool, timeout: int = 60,
     return 0 if result.status == ExecutionStatus.SUCCESS else 1
 
 
+def cli_lint(*, file: str, deep: bool = False, json_output: bool = False,
+             strict: bool = False, timeout: int = 60) -> int:
+    """Lint a SKILL .il file before it is loaded into Virtuoso.
+
+    Layer 1 (default) is a pure-Python structural check — balanced parens,
+    terminated strings/comments — that needs no running Virtuoso.  With
+    ``--deep`` the file is additionally routed through Cadence ``sklint``
+    on the live daemon for semantic checks; if no daemon is reachable the
+    deep pass is skipped with a note and Layer 1 findings still stand.
+
+    Returns: 0 when clean, 1 on error-severity findings (or any finding
+    with ``--strict``), 2 on a missing local file.
+    """
+    import json
+    import sys
+    from pathlib import Path
+
+    p = Path(file)
+    if not p.is_file():
+        print(f"ERROR: file not found: {p}", file=sys.stderr)
+        return 2
+
+    if deep:
+        import virtuoso_bridge as _vb_pkg
+        _load_cli_env()
+        client = _vb_pkg.VirtuosoClient.from_env(profile=_get_cli_profile())
+        report = client.lint_il(p, deep=True, timeout=timeout)
+    else:
+        from virtuoso_bridge.virtuoso.skill_lint import lint_file
+        report = lint_file(p)
+
+    if json_output:
+        print(json.dumps(report.to_dict(), indent=2, ensure_ascii=False))
+    else:
+        print(report.format())
+
+    if report.errors:
+        return 1
+    if strict and report.warnings:
+        return 1
+    return 0
+
+
 def cli_dismiss_dialog() -> int:
     """Find and dismiss blocking Virtuoso GUI dialogs via X11."""
     _load_cli_env()
@@ -1299,6 +1342,41 @@ def build_parser() -> argparse.ArgumentParser:
     sp_eval.add_argument("--quiet", action="store_true",
                          help="Suppress JSON output; only the exit code is reported")
 
+    sp_lint = subparsers.add_parser(
+        "lint",
+        help="Lint a SKILL .il file before loading it into Virtuoso",
+        description=(
+            "Two-layer SKILL lint.\n\n"
+            "Layer 1 (default, offline): pure-Python structural check —\n"
+            "balanced parentheses (incl. the super-bracket ']'), terminated\n"
+            "string literals and block comments.  Needs no running Virtuoso\n"
+            "and catches the mistakes that produce the most cryptic CIW\n"
+            "errors, before the code is ever sent.\n\n"
+            "Layer 2 (--deep): also routes the file through Cadence `sklint`\n"
+            "on the live daemon for semantic checks (undefined variables,\n"
+            "suspicious usage, style).  Skipped with a note if no daemon is\n"
+            "reachable.\n\n"
+            "Examples:\n"
+            "  virtuoso-bridge lint myscript.il\n"
+            "  virtuoso-bridge lint myscript.il --deep\n"
+            "  virtuoso-bridge lint myscript.il --json"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    sp_lint.add_argument("file", help="Path to the .il file to lint")
+    sp_lint.add_argument("--deep", action="store_true",
+                         help="Also run Cadence sklint on the live daemon")
+    sp_lint.add_argument("--strict", action="store_true",
+                         help="Exit non-zero on warnings too, not just errors")
+    sp_lint.add_argument("--json", action="store_true",
+                         help="Output the lint report as JSON")
+    sp_lint.add_argument("-p", "--profile", default=None,
+                         help="Connection profile (only used with --deep)")
+    sp_lint.add_argument("--env", default=None,
+                         help="Explicit .env file path (highest priority)")
+    sp_lint.add_argument("--timeout", type=int, default=60,
+                         help="sklint execution timeout in seconds (default: 60)")
+
     sp_dismiss = subparsers.add_parser(
         "dismiss-dialog", help="Find and dismiss blocking Virtuoso GUI dialogs")
     sp_dismiss.add_argument("-p", "--profile", default=None,
@@ -1487,6 +1565,13 @@ def main(argv: list[str] | None = None) -> int:
             stdin=getattr(args, "stdin", False),
             timeout=getattr(args, "timeout", 60),
             quiet=getattr(args, "quiet", False),
+        ),
+        "lint": lambda: cli_lint(
+            file=getattr(args, "file"),
+            deep=getattr(args, "deep", False),
+            json_output=getattr(args, "json", False),
+            strict=getattr(args, "strict", False),
+            timeout=getattr(args, "timeout", 60),
         ),
         "dismiss-dialog": cli_dismiss_dialog,
         "screenshot": cli_screenshot,

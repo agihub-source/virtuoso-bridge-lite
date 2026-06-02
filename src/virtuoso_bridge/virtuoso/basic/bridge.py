@@ -1181,6 +1181,73 @@ let((result winName ciwNum)
         result.metadata["skill_command"] = skill_command
         return result
 
+    def lint_il(self, path: str | Path, *, deep: bool = False,
+                timeout: int | None = None):
+        """Lint a SKILL ``.il`` file before it round-trips to Virtuoso.
+
+        Always runs the offline **structural** checker (Layer 1: balanced
+        parens, terminated strings/comments).  When *deep* is True, also
+        routes the file through Cadence ``sklint`` on the live daemon
+        (Layer 2: semantic checks) and merges its findings.  If no daemon
+        is reachable, the deep pass is skipped with a note and the
+        structural findings are still returned.
+
+        Returns a :class:`~virtuoso_bridge.virtuoso.skill_lint.LintReport`.
+        """
+        from pathlib import Path as _Path
+        from virtuoso_bridge.virtuoso.skill_lint import lint_file
+        from virtuoso_bridge.virtuoso.skill_lint.sklint import (
+            build_sklint_skill,
+            parse_lnt,
+        )
+
+        local = _Path(path)
+        report = lint_file(local)
+        if not deep:
+            return report
+
+        # Layer 2: hand the file to Cadence sklint on the daemon.
+        try:
+            remote_il, _uploaded = self._prepare_il_path(local)
+        except Exception as e:  # upload / path resolution failed
+            report.notes.append(f"sklint skipped: could not stage file ({e})")
+            return report
+
+        remote_lnt = f"{remote_il}.lnt"
+        effective_timeout = timeout if timeout is not None else self._timeout
+        skill = build_sklint_skill(remote_il, remote_lnt)
+        result = self.execute_skill(skill, timeout=effective_timeout)
+        if result.status != ExecutionStatus.SUCCESS:
+            errs = "; ".join(result.errors) or "sklint call failed"
+            report.notes.append(f"sklint skipped: {errs}")
+            return report
+
+        # Retrieve the .lnt output (remote → temp local, or read in place).
+        lnt_text = ""
+        try:
+            if self._tunnel is not None:
+                import tempfile
+                with tempfile.NamedTemporaryFile(
+                    suffix=".lnt", delete=False
+                ) as tf:
+                    tmp_path = _Path(tf.name)
+                dl = self._tunnel.download_file(remote_lnt, tmp_path)
+                if getattr(dl, "returncode", 1) == 0 and tmp_path.is_file():
+                    lnt_text = tmp_path.read_text(encoding="utf-8", errors="replace")
+                tmp_path.unlink(missing_ok=True)
+            else:
+                lnt_local = _Path(remote_lnt)
+                if lnt_local.is_file():
+                    lnt_text = lnt_local.read_text(encoding="utf-8", errors="replace")
+        except Exception as e:
+            report.notes.append(f"sklint output unreadable: {e}")
+            return report
+
+        report.sklint_raw = lnt_text
+        for finding in parse_lnt(lnt_text):
+            report.add(finding)
+        return report
+
     def run_il_file(self, path: str | Path, lib: str, cell: str, *,
                     view: str = "layout", view_type: str | None = None,
                     mode: str = "w", open_window: bool = True,
