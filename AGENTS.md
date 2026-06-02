@@ -270,7 +270,9 @@ virtuoso-bridge profile show    # print resolved profile, source, and venv bindi
 virtuoso-bridge profile bind PROFILE --venv  # pin active venv to PROFILE
 virtuoso-bridge profile clear --venv         # remove active venv's profile binding
 virtuoso-bridge load FILE.il    # run a .il file in Virtuoso (uploads in SSH mode)
+virtuoso-bridge load FILE.il --lint  # structural-lint first; abort before sending on errors
 virtuoso-bridge eval 'EXPR'     # run inline SKILL expression
+virtuoso-bridge eval 'EXPR' --lint   # structural-lint the snippet first; abort on errors
 virtuoso-bridge eval --stdin    # multi-line SKILL via stdin (auto-wrapped in progn)
 virtuoso-bridge lint FILE.il    # structural lint (parens/strings/comments), offline
 virtuoso-bridge lint FILE.il --deep  # also run Cadence sklint on the live daemon

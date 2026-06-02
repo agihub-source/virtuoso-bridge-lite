@@ -209,6 +209,7 @@ Load on demand — each contains detailed API docs and edge-case guidance:
 | `references/schematic-recreation.md` | Recreate schematic from existing design (grid layout, diff pair conventions) |
 | `references/batch-netlist-si.md` | Generate netlists without Maestro using si batch translator |
 | `references/skill-finder-python-api.md` | `skill-find` (search SKILL by name) and `skill-info` (More Info docs) |
+| `references/lint.md` | SKILL lint — offline structural checks + Cadence `sklint`; the `lint` command and the `--lint` pre-send guard on `load`/`eval` |
 
 ## Examples
 

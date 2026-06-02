@@ -149,3 +149,22 @@ def test_cli_lint_strict_fails_on_warning(tmp_path, capsys):
     f.write_text("   ")
     assert main(["lint", str(f)]) == 0          # warning only -> ok
     assert main(["lint", str(f), "--strict"]) == 1
+
+
+# --- --lint guard on load / eval (blocks before any network) ---------------
+
+def test_load_lint_guard_blocks_broken_file(tmp_path, capsys):
+    f = tmp_path / "bad.il"
+    f.write_text("foo(1 2")  # unclosed — must abort before connecting
+    rc = main(["load", str(f), "--lint"])
+    err = capsys.readouterr().err
+    assert rc == 1
+    assert "structural errors" in err
+    assert "not loading" in err
+
+
+def test_eval_lint_guard_blocks_broken_snippet(capsys):
+    rc = main(["eval", "foo(1 2", "--lint"])  # unclosed paren
+    err = capsys.readouterr().err
+    assert rc == 1
+    assert "not evaluating" in err

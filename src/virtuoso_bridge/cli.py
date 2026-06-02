@@ -744,7 +744,25 @@ def _make_ssh_runner() -> tuple["SSHRunner", str]:
                      jump_host=jump_host, jump_user=jump_user), remote_user
 
 
-def cli_load(*, file: str, timeout: int = 60, quiet: bool = False) -> int:
+def _lint_guard_blocks(code_or_path: str, *, is_file: bool, label: str) -> bool:
+    """Run Layer-1 structural lint; report to stderr. True => block the send.
+
+    Only error-severity findings block; warnings are advisory and pass.
+    """
+    import sys
+    from virtuoso_bridge.virtuoso.skill_lint import lint_file, lint_text
+
+    report = lint_file(code_or_path) if is_file else lint_text(code_or_path)
+    if report.errors:
+        print(report.format(), file=sys.stderr)
+        print(f"ERROR: --lint found structural errors; not {label}. "
+              "Re-run without --lint to send anyway.", file=sys.stderr)
+        return True
+    return False
+
+
+def cli_load(*, file: str, timeout: int = 60, quiet: bool = False,
+             lint: bool = False) -> int:
     """Execute a SKILL .il file in the running Virtuoso session.
 
     Equivalent to ``load("<file>")`` typed in the CIW: SKILL reads the
@@ -777,6 +795,12 @@ def cli_load(*, file: str, timeout: int = 60, quiet: bool = False) -> int:
         print(f"ERROR: file not found: {p}", file=sys.stderr)
         return 2
 
+    # Optional pre-send guard: catch structural breakage offline before it
+    # round-trips to Virtuoso (where errors are cryptic).  Findings go to
+    # stderr so stdout stays a clean VirtuosoResult JSON contract.
+    if lint and _lint_guard_blocks(str(p), is_file=True, label="loading"):
+        return 1
+
     _load_cli_env()
     client = _vb_pkg.VirtuosoClient.from_env(profile=_get_cli_profile())
     result = client.load_il(p, timeout=timeout)
@@ -794,7 +818,7 @@ def cli_load(*, file: str, timeout: int = 60, quiet: bool = False) -> int:
 
 
 def cli_eval(*, skill: str | None, stdin: bool, timeout: int = 60,
-             quiet: bool = False) -> int:
+             quiet: bool = False, lint: bool = False) -> int:
     """Execute a SKILL expression in the running Virtuoso session.
 
     Companion to :func:`cli_load` for one-liners and round-trip checks
@@ -825,6 +849,12 @@ def cli_eval(*, skill: str | None, stdin: bool, timeout: int = 60,
     if skill is None or not skill.strip():
         print("ERROR: empty SKILL expression", file=sys.stderr)
         return 2
+
+    # Optional pre-send guard: lint the *raw* snippet (before the progn
+    # wrap, which would balance parens of its own) and refuse to send on
+    # structural errors.
+    if lint and _lint_guard_blocks(skill, is_file=False, label="evaluating"):
+        return 1
 
     # Wrap in progn(...) on its own lines so that:
     #   * multi-statement inputs (`printf(...) "ret"`) work without the
@@ -1308,6 +1338,8 @@ def build_parser() -> argparse.ArgumentParser:
                          help="SKILL execution timeout in seconds (default: 60)")
     sp_load.add_argument("--quiet", action="store_true",
                          help="Suppress JSON output; only the exit code is reported")
+    sp_load.add_argument("--lint", action="store_true",
+                         help="Structural-lint the file first; abort on errors before loading")
 
     sp_eval = subparsers.add_parser(
         "eval",
@@ -1341,6 +1373,8 @@ def build_parser() -> argparse.ArgumentParser:
                          help="SKILL execution timeout in seconds (default: 60)")
     sp_eval.add_argument("--quiet", action="store_true",
                          help="Suppress JSON output; only the exit code is reported")
+    sp_eval.add_argument("--lint", action="store_true",
+                         help="Structural-lint the snippet first; abort on errors before evaluating")
 
     sp_lint = subparsers.add_parser(
         "lint",
@@ -1559,12 +1593,14 @@ def main(argv: list[str] | None = None) -> int:
             file=getattr(args, "file"),
             timeout=getattr(args, "timeout", 60),
             quiet=getattr(args, "quiet", False),
+            lint=getattr(args, "lint", False),
         ),
         "eval": lambda: cli_eval(
             skill=getattr(args, "skill", None),
             stdin=getattr(args, "stdin", False),
             timeout=getattr(args, "timeout", 60),
             quiet=getattr(args, "quiet", False),
+            lint=getattr(args, "lint", False),
         ),
         "lint": lambda: cli_lint(
             file=getattr(args, "file"),
