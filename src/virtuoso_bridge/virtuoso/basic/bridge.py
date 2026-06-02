@@ -1187,66 +1187,107 @@ let((result winName ciwNum)
 
         Always runs the offline **structural** checker (Layer 1: balanced
         parens, terminated strings/comments).  When *deep* is True, also
-        routes the file through Cadence ``sklint`` on the live daemon
-        (Layer 2: semantic checks) and merges its findings.  If no daemon
-        is reachable, the deep pass is skipped with a note and the
-        structural findings are still returned.
+        runs Cadence's own **SKILL Lint** (``sklint``) — driven through the
+        native standalone ``skill`` interpreter located on the host, the
+        same way SKILL Finder uses the native ``.fnd`` database.  This needs
+        only SSH + a Cadence install; no running Virtuoso and no loaded
+        bridge daemon.  Findings are merged into the report; if no Cadence
+        interpreter is reachable the deep pass is skipped with a note and
+        the structural findings still stand.
 
         Returns a :class:`~virtuoso_bridge.virtuoso.skill_lint.LintReport`.
         """
         from pathlib import Path as _Path
         from virtuoso_bridge.virtuoso.skill_lint import lint_file
-        from virtuoso_bridge.virtuoso.skill_lint.sklint import (
-            build_sklint_skill,
-            parse_lnt,
-        )
+        from virtuoso_bridge.virtuoso.skill_lint import native
+        from virtuoso_bridge.virtuoso.skill_lint.sklint import parse_lnt
 
         local = _Path(path)
         report = lint_file(local)
         if not deep:
             return report
 
-        # Layer 2: hand the file to Cadence sklint on the daemon.
-        try:
-            remote_il, _uploaded = self._prepare_il_path(local)
-        except Exception as e:  # upload / path resolution failed
-            report.notes.append(f"sklint skipped: could not stage file ({e})")
-            return report
-
-        remote_lnt = f"{remote_il}.lnt"
-        effective_timeout = timeout if timeout is not None else self._timeout
-        skill = build_sklint_skill(remote_il, remote_lnt)
-        result = self.execute_skill(skill, timeout=effective_timeout)
-        if result.status != ExecutionStatus.SUCCESS:
-            errs = "; ".join(result.errors) or "sklint call failed"
-            report.notes.append(f"sklint skipped: {errs}")
-            return report
-
-        # Retrieve the .lnt output (remote → temp local, or read in place).
-        lnt_text = ""
+        profile = getattr(self._tunnel, "_profile", None) if self._tunnel else None
         try:
             if self._tunnel is not None:
-                import tempfile
-                with tempfile.NamedTemporaryFile(
-                    suffix=".lnt", delete=False
-                ) as tf:
-                    tmp_path = _Path(tf.name)
-                dl = self._tunnel.download_file(remote_lnt, tmp_path)
-                if getattr(dl, "returncode", 1) == 0 and tmp_path.is_file():
-                    lnt_text = tmp_path.read_text(encoding="utf-8", errors="replace")
-                tmp_path.unlink(missing_ok=True)
+                self._sklint_remote(local, profile, report, timeout, parse_lnt, native)
             else:
-                lnt_local = _Path(remote_lnt)
-                if lnt_local.is_file():
-                    lnt_text = lnt_local.read_text(encoding="utf-8", errors="replace")
-        except Exception as e:
-            report.notes.append(f"sklint output unreadable: {e}")
-            return report
-
-        report.sklint_raw = lnt_text
-        for finding in parse_lnt(lnt_text):
-            report.add(finding)
+                self._sklint_local(local, profile, report, parse_lnt, native)
+        except Exception as e:  # never let the deep pass break the report
+            report.notes.append(f"sklint skipped: {e}")
         return report
+
+    def _sklint_remote(self, local, profile, report, timeout, parse_lnt, native) -> None:
+        """Run native sklint on the remote host over SSH; merge findings."""
+        import tempfile
+        from pathlib import Path as _Path
+
+        runner = self.ssh_runner
+        if runner is None:
+            report.notes.append("sklint skipped: no SSH connection")
+            return
+        skill_bin = native.discover_skill_binary(runner, profile)
+        if not skill_bin:
+            report.notes.append(
+                "sklint skipped: no Cadence 'skill' interpreter found "
+                "(set VB_CADENCE_CSHRC?)")
+            return
+
+        remote_il, _uploaded = self._prepare_il_path(local)
+        remote_lnt = f"{remote_il}.lnt"
+        remote_batch = f"{remote_il}.sklint.il"
+        up = self._tunnel.upload_text(
+            native.build_batch_il(remote_il, remote_lnt), remote_batch)
+        if getattr(up, "returncode", 1) != 0:
+            report.notes.append("sklint skipped: could not stage batch script")
+            return
+
+        effective_timeout = timeout if timeout is not None else self._timeout
+        cmd = native.build_run_command(skill_bin, remote_batch, profile)
+        self._tunnel.run_command(cmd, timeout=effective_timeout)
+
+        with tempfile.NamedTemporaryFile(suffix=".lnt", delete=False) as tf:
+            tmp_path = _Path(tf.name)
+        try:
+            dl = self._tunnel.download_file(remote_lnt, tmp_path)
+            if getattr(dl, "returncode", 1) == 0 and tmp_path.is_file():
+                report.sklint_raw = tmp_path.read_text(encoding="utf-8", errors="replace")
+            else:
+                report.notes.append("sklint produced no output file")
+        finally:
+            tmp_path.unlink(missing_ok=True)
+
+        if report.sklint_raw:
+            for finding in parse_lnt(report.sklint_raw):
+                report.add(finding)
+
+    def _sklint_local(self, local, profile, report, parse_lnt, native) -> None:
+        """Run native sklint on the local machine via subprocess; merge findings."""
+        import subprocess
+        import tempfile
+        from pathlib import Path as _Path
+
+        skill_bin = native.discover_skill_binary_local()
+        if not skill_bin:
+            report.notes.append(
+                "sklint skipped: no Cadence 'skill' interpreter on PATH")
+            return
+
+        with tempfile.TemporaryDirectory(prefix="vb_sklint_") as d:
+            lnt_path = _Path(d) / (local.name + ".lnt")
+            batch_path = _Path(d) / (local.name + ".sklint.il")
+            batch_path.write_text(
+                native.build_batch_il(str(local.resolve()), str(lnt_path)),
+                encoding="utf-8")
+            cmd = native.build_run_command(skill_bin, str(batch_path), profile)
+            subprocess.run(["bash", "-c", cmd], capture_output=True, text=True,
+                           timeout=120)
+            if lnt_path.is_file():
+                report.sklint_raw = lnt_path.read_text(encoding="utf-8", errors="replace")
+                for finding in parse_lnt(report.sklint_raw):
+                    report.add(finding)
+            else:
+                report.notes.append("sklint produced no output file")
 
     def run_il_file(self, path: str | Path, lib: str, cell: str, *,
                     view: str = "layout", view_type: str | None = None,

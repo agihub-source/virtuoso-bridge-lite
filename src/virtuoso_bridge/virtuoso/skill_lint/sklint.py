@@ -1,16 +1,9 @@
-"""Layer 2 — Cadence ``sklint`` integration.
+"""Layer 2 — parsing Cadence ``sklint`` (SKILL Lint) output.
 
-The real Cadence SKILL Lint program is exposed as a SKILL function callable
-from the CIW::
-
-    sklint(?file "design.il" ?outputFile "design.il.lnt")
-
-It examines SKILL for issues that normal testing misses (undefined
-variables, suspicious usage, style) and writes its findings to the
-``?outputFile``.  This module holds the two **pure** pieces — building the
-SKILL call and parsing the ``.lnt`` output — so they are testable without a
-running Virtuoso.  Orchestration (upload → execute_skill → download →
-parse) lives in :meth:`VirtuosoClient.lint_il`.
+The real Cadence SKILL Lint program writes its findings to a ``.lnt`` file.
+This module holds the **pure**, version-tolerant parser for that output;
+discovery and invocation of the native ``skill`` interpreter live in
+:mod:`.native`, and orchestration in :meth:`VirtuosoClient.lint_il`.
 """
 
 from __future__ import annotations
@@ -18,16 +11,6 @@ from __future__ import annotations
 import re
 
 from . import LintFinding, SEVERITY_ERROR, SEVERITY_INFO, SEVERITY_WARNING
-
-
-def build_sklint_skill(remote_il: str, remote_lnt: str) -> str:
-    """Return the SKILL expression that lints *remote_il* into *remote_lnt*.
-
-    Both paths are emitted verbatim inside double quotes; callers pass
-    already-resolved POSIX paths (no embedded quotes), matching how the
-    rest of the bridge builds ``load("...")`` commands.
-    """
-    return f'sklint(?file "{remote_il}" ?outputFile "{remote_lnt}")'
 
 
 # sklint emits free-form text whose exact shape varies across Cadence

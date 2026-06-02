@@ -9,10 +9,8 @@ from virtuoso_bridge.virtuoso.skill_lint import (
     lint_text,
     lint_file,
 )
-from virtuoso_bridge.virtuoso.skill_lint.sklint import (
-    build_sklint_skill,
-    parse_lnt,
-)
+from virtuoso_bridge.virtuoso.skill_lint.sklint import parse_lnt
+from virtuoso_bridge.virtuoso.skill_lint import native
 
 
 # --- Layer 1: structural checker -------------------------------------------
@@ -81,11 +79,62 @@ def test_lint_file_sets_path(tmp_path):
     assert report.ok
 
 
-# --- Layer 2: sklint pure helpers ------------------------------------------
+# --- Layer 2: native sklint helpers ----------------------------------------
 
-def test_build_sklint_skill():
-    skill = build_sklint_skill("/tmp/x.il", "/tmp/x.il.lnt")
-    assert skill == 'sklint(?file "/tmp/x.il" ?outputFile "/tmp/x.il.lnt")'
+def test_build_batch_il_calls_sklint_and_exits():
+    batch = native.build_batch_il("/tmp/x.il", "/tmp/x.il.lnt")
+    assert 'sklint(?file "/tmp/x.il" ?outputFile "/tmp/x.il.lnt")' in batch
+    assert "exit()" in batch
+
+
+def test_discover_script_walks_virtuoso_to_sibling_skill():
+    script = native.discover_script(profile=None)
+    assert "which virtuoso" in script
+    assert '/skill' in script  # sibling in the same bin dir
+    assert "NOTFOUND" in script
+
+
+def test_parse_discover_output():
+    assert native.parse_discover_output("/cad/tools/dfII/bin/skill\n") == \
+        "/cad/tools/dfII/bin/skill"
+    assert native.parse_discover_output("NOTFOUND\n") is None
+    assert native.parse_discover_output("") is None
+
+
+def test_build_run_command_quotes_binary_and_batch():
+    cmd = native.build_run_command("/c ad/skill", "/tmp/b.il", profile=None)
+    assert "'/c ad/skill'" in cmd
+    assert "/tmp/b.il" in cmd
+
+
+def test_discover_skill_binary_via_fake_runner():
+    class _R:
+        def run_command(self, cmd, timeout=None):
+            class _Res:
+                returncode = 0
+                stdout = "/cad/tools/dfII/bin/skill\n"
+                stderr = ""
+            return _Res()
+
+    assert native.discover_skill_binary(_R()) == "/cad/tools/dfII/bin/skill"
+
+
+def test_discover_skill_binary_notfound_via_fake_runner():
+    class _R:
+        def run_command(self, cmd, timeout=None):
+            class _Res:
+                returncode = 0
+                stdout = "NOTFOUND\n"
+                stderr = ""
+            return _Res()
+
+    assert native.discover_skill_binary(_R()) is None
+
+
+def test_cadence_env_prefix_uses_profile_suffix(monkeypatch):
+    monkeypatch.setenv("VB_CADENCE_CSHRC_worker1", "/lab/cds.cshrc")
+    prefix = native.cadence_env_prefix("worker1")
+    assert "/lab/cds.cshrc" in prefix
 
 
 def test_parse_lnt_classifies_severity_and_line():

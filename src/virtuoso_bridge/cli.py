@@ -1386,10 +1386,12 @@ def build_parser() -> argparse.ArgumentParser:
             "string literals and block comments.  Needs no running Virtuoso\n"
             "and catches the mistakes that produce the most cryptic CIW\n"
             "errors, before the code is ever sent.\n\n"
-            "Layer 2 (--deep): also routes the file through Cadence `sklint`\n"
-            "on the live daemon for semantic checks (undefined variables,\n"
-            "suspicious usage, style).  Skipped with a note if no daemon is\n"
-            "reachable.\n\n"
+            "Layer 2 (--deep): also runs Cadence `sklint` via the native\n"
+            "standalone `skill` interpreter on the host (located like SKILL\n"
+            "Finder: sibling of the `virtuoso` binary) for semantic checks —\n"
+            "undefined variables, suspicious usage, style.  Needs only SSH +\n"
+            "a Cadence install (no running Virtuoso); skipped with a note if\n"
+            "no interpreter is reachable.\n\n"
             "Examples:\n"
             "  virtuoso-bridge lint myscript.il\n"
             "  virtuoso-bridge lint myscript.il --deep\n"
@@ -1399,7 +1401,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sp_lint.add_argument("file", help="Path to the .il file to lint")
     sp_lint.add_argument("--deep", action="store_true",
-                         help="Also run Cadence sklint on the live daemon")
+                         help="Also run Cadence sklint via the native skill interpreter (SSH + Cadence install)")
     sp_lint.add_argument("--strict", action="store_true",
                          help="Exit non-zero on warnings too, not just errors")
     sp_lint.add_argument("--json", action="store_true",

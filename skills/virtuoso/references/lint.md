@@ -7,7 +7,12 @@ both reachable from the CLI and the Python API.
 | Layer | What it checks | Needs Virtuoso? | Entry |
 |---|---|---|---|
 | **1 — structural** (default) | balanced parens (incl. super-bracket `]`), terminated string literals, terminated block comments | No — pure Python, offline, instant | `virtuoso-bridge lint FILE.il` / `lint_text()` / `lint_file()` |
-| **2 — Cadence `sklint`** (`--deep`) | undefined variables, suspicious usage, style — the real Cadence SKILL Lint | Yes — runs on the live daemon | `virtuoso-bridge lint FILE.il --deep` / `client.lint_il(path, deep=True)` |
+| **2 — Cadence `sklint`** (`--deep`) | undefined variables, suspicious usage, style — the real Cadence SKILL Lint | No running Virtuoso — just **SSH + a Cadence install** | `virtuoso-bridge lint FILE.il --deep` / `client.lint_il(path, deep=True)` |
+
+Layer 2 leans on Cadence's own tooling the same way **SKILL Finder** uses the
+native `.fnd` database: it locates the standalone `skill` interpreter on the
+host (a sibling of the `virtuoso` binary) and drives `sklint` through it over
+SSH. No CIW, no loaded bridge daemon.
 
 Layer 1 is intentionally **conservative**: it only reports problems it is
 confident about, so it never false-positives on valid SKILL — including the
@@ -35,8 +40,10 @@ virtuoso-bridge lint myscript.il --strict
 Exit codes: `0` clean · `1` error-severity findings (or any finding with
 `--strict`) · `2` file not found.
 
-If `--deep` is requested but no daemon is reachable, the deep pass is skipped
-with a note and the Layer-1 findings still stand (exit code unaffected).
+If `--deep` is requested but no Cadence `skill` interpreter is reachable, the
+deep pass is skipped with a note and the Layer-1 findings still stand (exit
+code unaffected). Set `VB_CADENCE_CSHRC` if `virtuoso`/`skill` is not already
+on the remote shell's PATH (same knob as Spectre and SKILL Finder).
 
 ## Pre-send guard on `load` / `eval`
 
@@ -76,26 +83,34 @@ report = client.lint_il("myscript.il", deep=True)
 # report.sklint_raw holds the full .lnt text; report.notes explains any skip.
 ```
 
-## How Layer 2 works (`sklint`)
+## How Layer 2 works (native `skill` interpreter)
 
-Cadence ships SKILL Lint as a CIW-callable function. The bridge calls it on
-the daemon and parses the output file:
+Cadence ships a standalone SKILL interpreter — `<install>/tools/dfII/bin/skill`,
+a sibling of the `virtuoso` binary — and SKILL Lint runs in batch through it:
 
-```skill
-sklint(?file "design.il" ?outputFile "design.il.lnt")
+```bash
+skill batchLint.il            # batchLint.il: sklint(?file "x.il" ?outputFile "x.lnt") + exit()
 ```
 
-The bridge uploads the `.il` (SSH mode), runs the call via `execute_skill`,
-downloads the `.lnt`, and parses it into structured findings. The `.lnt`
-format varies across Cadence releases, so parsing is **tolerant**: lines
-carrying a severity keyword (`ERROR`/`WARNING`/`INFO`) become findings, line
-numbers and `(SKILL-NNNN)` codes are extracted when present, and the full raw
-`.lnt` text is always preserved on `report.sklint_raw`.
+The bridge (mirroring SKILL Finder's discovery):
+
+1. sources `VB_CADENCE_CSHRC`, runs `which virtuoso`, takes the sibling `skill`;
+2. uploads the target `.il` + a generated batch script (SSH mode);
+3. runs `skill <batch>.il` over the **SSH shell** — no CIW, no bridge daemon;
+4. downloads the `.lnt` and parses it.
+
+The `.lnt` format varies across Cadence releases, so parsing is **tolerant**:
+lines carrying a severity keyword (`ERROR`/`WARNING`/`INFO`) become findings,
+line numbers and `(SKILL-NNNN)` codes are extracted when present, and the full
+raw `.lnt` text is always preserved on `report.sklint_raw`.
 
 ## Boundaries
 
 - Layer 1 is **structural only** — it does not know SKILL semantics (undefined
   functions, type errors). Use `--deep` for that.
-- `sklint` is **file-oriented** and runs in the single-threaded CIW; it needs a
-  running Virtuoso and briefly occupies the SKILL channel.
+- `sklint` is **file-oriented**; inline snippets are written to a temp `.il`.
+- Layer 2 needs SSH reachability + a Cadence install (and license env, via
+  `VB_CADENCE_CSHRC` when not already on PATH). It does **not** need a running
+  Virtuoso — but the native `skill` interpreter still has Cadence startup cost,
+  so it is opt-in (`--deep`), not the default or the `--lint` guard.
 - `sklint` availability and exact `.lnt` schema depend on the Cadence version.
