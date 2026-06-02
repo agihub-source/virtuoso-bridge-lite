@@ -3,7 +3,11 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/Arcadia-1/virtuoso-bridge-lite/stargazers"><img src="https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2FArcadia-1%2Fvirtuoso-bridge-lite%2Fmain%2Fstats%2Fstars-badge.json&style=flat-square&logo=github" alt="GitHub stars"/></a>
+  <a href="https://oosmetrics.com/repo/Arcadia-1/virtuoso-bridge-lite"><img src="https://api.oosmetrics.com/api/v1/badge/achievement/8d369c0f-7036-4e79-9ed3-a71689ba4660.svg" alt="oosmetrics — Top 5 in Fullstack by acceleration (2026-05-09)"/></a>
+</p>
+
+<p align="center">
+  <a href="https://github.com/Arcadia-1/virtuoso-bridge-lite/stargazers"><img src="https://img.shields.io/github/stars/Arcadia-1/virtuoso-bridge-lite?style=flat-square&color=f5c542&logo=github&v=20260523" alt="GitHub stars"/></a>
   <a href="https://github.com/Arcadia-1/virtuoso-bridge-lite/network/members"><img src="https://img.shields.io/github/forks/Arcadia-1/virtuoso-bridge-lite?style=flat-square&color=f5c542" alt="GitHub forks"/></a>
   <a href="stats/README.md"><img src="https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2FArcadia-1%2Fvirtuoso-bridge-lite%2Fmain%2Fstats%2Fclones-badge.json&style=flat-square&v=2" alt="Clones"/></a>
   <a href="stats/README.md"><img src="https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2FArcadia-1%2Fvirtuoso-bridge-lite%2Fmain%2Fstats%2Fviews-badge.json&style=flat-square&v=2" alt="Views"/></a>
@@ -13,10 +17,8 @@
   <a href="https://github.com/Arcadia-1/virtuoso-bridge-lite/issues"><img src="https://img.shields.io/github/issues/Arcadia-1/virtuoso-bridge-lite?style=flat-square&color=3fb950" alt="Open Issues"/></a>
   <a href="https://github.com/Arcadia-1/virtuoso-bridge-lite/commits/main"><img src="https://img.shields.io/github/last-commit/Arcadia-1/virtuoso-bridge-lite?style=flat-square&color=3fb950" alt="Last Commit"/></a>
   <a href="https://virtuoso-bridge.tokenzhang.com"><img src="https://img.shields.io/badge/docs-website-blue" alt="Website"/></a>
-  <a href="https://www.python.org/downloads/"><img src="https://img.shields.io/badge/python-3.9%2B-blue.svg" alt="Python 3.9+"/></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green.svg" alt="License: MIT"/></a>
   <a href="https://github.com/Arcadia-1/virtuoso-bridge-lite/pulls"><img src="https://img.shields.io/badge/PRs-welcome-brightgreen.svg" alt="PRs Welcome"/></a>
-  <img src="https://img.shields.io/badge/AI%20Native-agent--driven-blueviolet" alt="AI Native"/>
 </p>
 
 A new infrastructure for **Agentic Analog and Mixed-Signal Design**. LLM Agents drive Cadence Virtuoso instances — locally or remotely — turning tedious handcrafting into automated design flows.
@@ -39,73 +41,42 @@ A new infrastructure for **Agentic Analog and Mixed-Signal Design**. LLM Agents 
 
 > **If you are an AI agent**, read [`AGENTS.md`](AGENTS.md) first and follow its setup checklist.
 
-## Comparison with skillbridge
+## Choose your setup
 
-| Feature | virtuoso-bridge-lite | [skillbridge](https://github.com/unihd-cag/skillbridge) |
+| You want to... | Use this path | Needs |
 |---|---|---|
-| **Core mechanism** | `ipcBeginProcess` + `evalstring` | `ipcBeginProcess` + `evalstring` |
-| **Local mode** | Yes | Yes |
-| **Remote execution** | SSH tunnel, jump host, auto-reconnect | Not supported |
-| **Calling style** | String-based: `execute_skill("dbOpenCellViewByType(...)")` | Pythonic mapping: `ws.db.open_cell_view_by_type(...)` |
-| **Load .il files** | `client.load_il()` | Not supported |
-| **Layout / schematic API** | `client.layout.edit()` context manager | Raw SKILL only |
-| **Spectre simulation** | Built-in runner + PSF parser | Not supported |
-| **AI agent support** | Skill files, CLI-first, command logging | Not designed for agents |
-| **Python ↔ SKILL types** | String-based | Auto bidirectional mapping |
-| **IDE tab completion** | No (not needed by agents) | Yes (Jupyter, PyCharm stubs) |
+| Drive Virtuoso on a remote EDA server | Remote mode | SSH access, running Virtuoso, `load(...)` in CIW |
+| Drive Virtuoso on the same machine | Local mode | Running Virtuoso, `VB_REMOTE_HOST=localhost` |
+| Run Spectre from netlists | Spectre simulator | `spectre` on PATH, or `VB_CADENCE_CSHRC` |
+| Let a coding agent operate Cadence | Agent skills | Link `skills/` into your agent's skill directory |
 
-**In short:** Both projects are built on the same Cadence SKILL IPC facility, using the same core mechanism: `ipcBeginProcess` + `evalstring` + `ipcWriteProcess`. Here are the core lines from each:
-
-<details>
-<summary><b>virtuoso-bridge-lite</b> — <code>src/virtuoso_bridge/virtuoso/basic/resources/ramic_bridge.il</code></summary>
-
-```skill
-RBIpc = ipcBeginProcess(
-  sprintf(nil "%s %L %L %L" RBPython RBDPath host RBPort)
-  "" 'RBIpcDataHandler 'RBIpcErrHandler 'RBIpcFinishHandler "")
-
-procedure(RBIpcDataHandler(ipcId data)
-  if(errset(result = evalstring(data)) then
-    ipcWriteProcess(ipcId sprintf(nil "%c%L%c" 2 result 30))
-  else
-    ipcWriteProcess(ipcId sprintf(nil "%c%L%c" 21 errset.errset 30))
-  )
-)
-```
-</details>
-
-<details>
-<summary><b>skillbridge</b> — <code>skillbridge/server/python_server.il</code></summary>
-
-```skill
-pyStartServer.ipc = ipcBeginProcess(
-  executableWithArgs "" '__pyOnData '__pyOnError '__pyOnFinish pyStartServer.logName)
-
-defun(__pyOnData (id data)
-  foreach(line parseString(data "\n")
-    capturedWarning = __pyCaptureWarnings(errset(result=evalstring(line)))
-    ipcWriteProcess(id lsprintf("success %L\n" result))
-  )
-)
-```
-</details>
-
-The divergence is in what's built on top: skillbridge stays thin — a Pythonic RPC client for interactive local use. virtuoso-bridge-lite adds SSH remote access, high-level layout/schematic APIs, Spectre simulation, and an AI-agent-ready harness.
+Virtuoso SKILL execution and Spectre simulation are independent. You can run
+Spectre without the SKILL bridge, and you can use the SKILL bridge without
+Spectre.
 
 ## Quick Start
 
 ```bash
-pip install -e .              # install
-virtuoso-bridge init user@host [-J user@jump-host]   # write ~/.virtuoso-bridge/.env in one shot
-                                                     # (no args: empty template — edit it yourself)
-virtuoso-bridge start         # start SSH tunnel
-virtuoso-bridge status        # verify connection
-virtuoso-bridge windows       # list all open Virtuoso windows
-virtuoso-bridge screenshot    # screenshot CIW (or: current, N)
-virtuoso-bridge export-visio MyLib MyCell -o MyCell.vsdx  # Windows + Visio
-                                                          # (NMOS/PMOS bulk pin `B` is dropped by default;
-                                                          #  add --include-body-pins to draw bulk nets too)
+# 0. Get the source
+git clone https://github.com/Arcadia-1/virtuoso-bridge-lite.git
+cd virtuoso-bridge-lite
+
+# 1. Install in a virtual environment
+uv venv .venv
+source .venv/bin/activate
+uv pip install -e .
+
+# 2. Create ~/.virtuoso-bridge/.env
+virtuoso-bridge init user@host [-J user@jump-host]
+# Or: virtuoso-bridge init      # empty template; edit VB_REMOTE_HOST yourself
+
+# 3. Start and verify
+virtuoso-bridge start          # starts tunnel and prints the CIW load(...) line
+virtuoso-bridge status         # tunnel + Virtuoso daemon + Spectre availability
 ```
+
+On Windows PowerShell, replace the activation line with
+`.\.venv\Scripts\Activate.ps1`.
 
 ```python
 from virtuoso_bridge import VirtuosoClient
@@ -113,7 +84,65 @@ client = VirtuosoClient.from_env()
 client.execute_skill("1+2")  # VirtuosoResult(status=SUCCESS, output='3')
 ```
 
+Useful first commands after the bridge is up:
+
+```bash
+virtuoso-bridge windows       # list all open Virtuoso windows
+virtuoso-bridge screenshot    # screenshot CIW (or: current, N)
+virtuoso-bridge export-visio MyLib MyCell -o MyCell.vsdx  # Windows + Visio
+```
+
+…or skip Python entirely — run SKILL straight from the shell:
+
+```bash
+# One-liner — full VirtuosoResult JSON on stdout
+virtuoso-bridge eval 'getCurrentTime()'
+
+# Multi-line SKILL via heredoc (auto-wrapped in progn; returns the last form)
+virtuoso-bridge eval --stdin <<'EOF'
+let((libs)
+  libs = mapcar(lambda((l) l~>name) ddGetLibList())
+  printf("found %d libraries\n" length(libs))
+  libs)
+EOF
+
+# Whole .il file — uploaded automatically in SSH mode
+virtuoso-bridge load my_script.il
+```
+
 For detailed setup (jump hosts, multi-profile, local mode), see [`AGENTS.md`](AGENTS.md).
+
+## CLI reference
+
+All commands take `-p PROFILE` / `--env PATH` to pick a non-default config; run `virtuoso-bridge <cmd> --help` for full flags.
+
+| Command | What it does |
+|---|---|
+| **Tunnel / lifecycle** | |
+| `init [user@host] [-J jump]` | Write a starter `.env` (no args = empty template) |
+| `start [--bind-venv]` | Start SSH tunnel + deploy daemon; `--bind-venv` (with `-p X`) also binds the active virtualenv to profile `X` |
+| `stop` | Stop the SSH tunnel |
+| `restart` | Restart tunnel + daemon |
+| `status` | Tunnel + daemon health + Spectre availability |
+| `license` | Check Spectre license availability |
+| **Profile binding** | |
+| `profile show` | Print the resolved profile, its source, and the active venv binding path |
+| `profile bind PROFILE --venv` | Pin the active virtualenv to `PROFILE` (naked `from_env()` calls in that venv resolve to it) |
+| `profile clear --venv` | Remove the venv binding |
+| **SKILL execution** | |
+| `load FILE.il` | Run a `.il` file in Virtuoso (uploads it in SSH mode). VS Code task–friendly; outputs `VirtuosoResult` JSON |
+| `eval 'EXPR'` / `eval --stdin` | Run an inline SKILL expression; supports multi-statement via auto-wrapped `progn(...)` |
+| `lint FILE.il` / `lint --deep` | Structural lint (balanced parens, terminated strings — offline); `--deep` also runs Cadence `sklint` via the native `skill` interpreter (SSH + Cadence install, no running Virtuoso) |
+| **Interaction / diagnostics** | |
+| `windows` | List all open Virtuoso windows (number + name) |
+| `screenshot [ciw\|current\|N]` | Capture a window to `output/` |
+| `dismiss-dialog` | X11 path: find and dismiss blocking GUI dialogs (saves you when SKILL channel deadlocks on a modal) |
+| `snapshot [-o DIR] [--history H]` | Dump the focused Virtuoso window (maestro/schematic/...) — brief by default, full disk dump with `-o` |
+| **Export** | |
+| `export-visio LIB CELL -o OUT.vsdx` | Render a Virtuoso schematic to Microsoft Visio (Windows + pywin32) |
+| **SKILL Finder** | |
+| `skill-find <query>` | Search SKILL functions by name (fuzzy/prefix/suffix/exact/regex) |
+| `skill-info <fn>` | Get detailed More Info docs for a SKILL function |
 
 ## Snapshot a maestro run
 
@@ -179,9 +208,62 @@ same pattern — point their skills path at `skills/` in this repo.
 
 Fully decoupled: VirtuosoClient works with any TCP endpoint — SSH tunnel, VPN, direct LAN, or local. Multiple connection profiles are supported, each managing an independent tunnel to a separate design server.
 
-> Want to understand the raw mechanism? See [`core/`](core/) — the entire bridge distilled into 3 files (180 lines).
+> Want to understand the raw mechanism? Start with [`src/virtuoso_bridge/virtuoso/basic/resources/ramic_bridge.il`](src/virtuoso_bridge/virtuoso/basic/resources/ramic_bridge.il) and [`src/virtuoso_bridge/virtuoso/basic/bridge.py`](src/virtuoso_bridge/virtuoso/basic/bridge.py).
 
 > Want to use Virtuoso locally without SSH? See [Local mode](AGENTS.md#local-mode) in AGENTS.md.
+
+## Comparison with skillbridge
+
+| Feature | virtuoso-bridge-lite | [skillbridge](https://github.com/unihd-cag/skillbridge) |
+|---|---|---|
+| **Core mechanism** | `ipcBeginProcess` + `evalstring` | `ipcBeginProcess` + `evalstring` |
+| **Local mode** | Yes | Yes |
+| **Remote execution** | SSH tunnel, jump host, auto-reconnect | Not supported |
+| **Calling style** | String-based: `execute_skill("dbOpenCellViewByType(...)")` | Pythonic mapping: `ws.db.open_cell_view_by_type(...)` |
+| **Load .il files** | `client.load_il()` | Not supported |
+| **Layout / schematic API** | `client.layout.edit()` context manager | Raw SKILL only |
+| **Spectre simulation** | Built-in runner + PSF parser | Not supported |
+| **AI agent support** | Skill files, CLI-first, command logging | Not designed for agents |
+| **Python ↔ SKILL types** | String-based | Auto bidirectional mapping |
+| **IDE tab completion** | No (not needed by agents) | Yes (Jupyter, PyCharm stubs) |
+
+**In short:** Both projects are built on the same Cadence SKILL IPC facility, using the same core mechanism: `ipcBeginProcess` + `evalstring` + `ipcWriteProcess`. Here are the core lines from each:
+
+<details>
+<summary><b>virtuoso-bridge-lite</b> — <code>src/virtuoso_bridge/virtuoso/basic/resources/ramic_bridge.il</code></summary>
+
+```skill
+RBIpc = ipcBeginProcess(
+  sprintf(nil "%s %L %L %L" RBPython RBDPath host RBPort)
+  "" 'RBIpcDataHandler 'RBIpcErrHandler 'RBIpcFinishHandler "")
+
+procedure(RBIpcDataHandler(ipcId data)
+  if(errset(result = evalstring(data)) then
+    ipcWriteProcess(ipcId sprintf(nil "%c%L%c" 2 result 30))
+  else
+    ipcWriteProcess(ipcId sprintf(nil "%c%L%c" 21 errset.errset 30))
+  )
+)
+```
+</details>
+
+<details>
+<summary><b>skillbridge</b> — <code>skillbridge/server/python_server.il</code></summary>
+
+```skill
+pyStartServer.ipc = ipcBeginProcess(
+  executableWithArgs "" '__pyOnData '__pyOnError '__pyOnFinish pyStartServer.logName)
+
+defun(__pyOnData (id data)
+  foreach(line parseString(data "\n")
+    capturedWarning = __pyCaptureWarnings(errset(result=evalstring(line)))
+    ipcWriteProcess(id lsprintf("success %L\n" result))
+  )
+)
+```
+</details>
+
+The divergence is in what's built on top: skillbridge stays thin — a Pythonic RPC client for interactive local use. virtuoso-bridge-lite adds SSH remote access, high-level layout/schematic APIs, Spectre simulation, and an AI-agent-ready harness.
 
 ## Citation
 

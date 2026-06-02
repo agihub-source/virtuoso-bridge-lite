@@ -50,6 +50,7 @@ Always use the highest level that works. Drop to a lower level only when needed.
 | **Layout** | Create/edit layout, add shapes/vias/instances | `client.layout.*` | `references/layout-python-api.md`, `references/layout-skill-api.md` |
 | **Maestro** | Read/write ADE Assembler config, run simulations | `virtuoso_bridge.virtuoso.maestro` | `references/maestro-python-api.md`, `references/maestro-skill-api.md` |
 | **Netlist (si)** | Batch netlist generation without Maestro | `simInitEnvWithArgs` + `si` CLI | See "Batch Netlist (si)" section below |
+| **SKILL Finder** | Search SKILL function names and get detailed docs | `client.find_skill()`, `client.get_skill_more_info()` | `references/skill-finder-python-api.md` |
 | **General** | File transfer, screenshots, raw SKILL, .il loading | `client.*` | See below |
 
 ## Before you start
@@ -207,6 +208,8 @@ Load on demand — each contains detailed API docs and edge-case guidance:
 | `references/cellview-on-disk-layout.md` | What's inside each view on disk (`sch.oa`, `data.dm` binary format, `maestro.sdb`/`active.state` XML skeleton, lock files, SOS markers); which files are text-editable vs must go through DFII API |
 | `references/schematic-recreation.md` | Recreate schematic from existing design (grid layout, diff pair conventions) |
 | `references/batch-netlist-si.md` | Generate netlists without Maestro using si batch translator |
+| `references/skill-finder-python-api.md` | `skill-find` (search SKILL by name) and `skill-info` (More Info docs) |
+| `references/lint.md` | SKILL lint — offline structural checks + Cadence `sklint`; the `lint` command and the `--lint` pre-send guard on `load`/`eval` |
 
 ## Examples
 

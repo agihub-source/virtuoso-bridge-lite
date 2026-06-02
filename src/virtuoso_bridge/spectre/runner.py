@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any, NamedTuple
 
 from virtuoso_bridge.env import load_vb_env
+from virtuoso_bridge.profile import resolve_profile
 from virtuoso_bridge.models import ExecutionStatus, SimulationResult
 from virtuoso_bridge.spectre.parsers import (
     parse_psf_ascii_directory,
@@ -23,6 +24,7 @@ from virtuoso_bridge.spectre.parsers import (
 from virtuoso_bridge.transport.tunnel import _is_localhost
 from virtuoso_bridge.transport.remote_paths import (
     default_remote_spectre_work_dir,
+    resolve_client_id,
     resolve_remote_username,
 )
 from virtuoso_bridge.transport.ssh import SSHRunner, RemoteTaskResult, run_remote_task, remote_ssh_env_from_os
@@ -466,7 +468,16 @@ class SpectreSimulator:
         ssh_runner: SSHRunner | None = None,
         profile: str | None = None,
     ) -> None:
+        profile = resolve_profile(profile)
         load_vb_env()
+        if spectre_cmd == "spectre":
+            suffix = f"_{profile}" if profile else ""
+            vb_bin = (
+                os.environ.get(f"VB_SPECTRE_BIN{suffix}", "").strip()
+                or os.environ.get("VB_SPECTRE_BIN", "").strip()
+            )
+            if vb_bin:
+                spectre_cmd = vb_bin
         self._spectre_cmd = spectre_cmd
         self._spectre_args = list(spectre_args or [])
         self._timeout = timeout
@@ -474,7 +485,7 @@ class SpectreSimulator:
         self._output_format = output_format
         self._ssh_key_path = ssh_key_path
         self._ssh_config_path = ssh_config_path
-        self._max_workers = 8
+        self._max_workers = 64
         self._pool: ThreadPoolExecutor | None = None
         self._keep_remote_files = keep_remote_files
         self._ssh_runner: SSHRunner | None = ssh_runner
@@ -521,6 +532,7 @@ class SpectreSimulator:
         ControlMaster).  Raises RuntimeError if no remote connection is
         available.
         """
+        profile = resolve_profile(profile)
         load_vb_env()
         # Check if we should run locally
         suffix = f"_{profile}" if profile else ""
@@ -725,24 +737,36 @@ class SpectreSimulator:
 
         runner = self._get_ssh_runner()
 
-        # Build env setup: source cshrc in csh, then check spectre
         suffix = f"_{self._profile}" if self._profile else ""
-        cadence_cshrc = shlex.quote(
-            os.environ.get(f"VB_CADENCE_CSHRC{suffix}", "")
-            or os.environ.get("VB_CADENCE_CSHRC", "")
+        spectre_bin = (
+            os.environ.get(f"VB_SPECTRE_BIN{suffix}", "").strip()
+            or os.environ.get("VB_SPECTRE_BIN", "").strip()
         )
+
+        if spectre_bin:
+            quoted_bin = shlex.quote(spectre_bin)
+            env_setup = ""
+            path_expr = spectre_bin
+            ver_cmd = f"{quoted_bin} -V"
+        else:
+            cadence_cshrc = shlex.quote(
+                os.environ.get(f"VB_CADENCE_CSHRC{suffix}", "")
+                or os.environ.get("VB_CADENCE_CSHRC", "")
+            )
+            env_setup = (
+                'HOSTNAME=`hostname 2>/dev/null || echo localhost`; export HOSTNAME && '
+                f'export VB_CADENCE_CSHRC={cadence_cshrc} && '
+                f'eval "$(csh -c \'source {cadence_cshrc}; env\' 2>/dev/null '
+                f'| grep -E \"^(PATH|LM_LICENSE_FILE|CDS)=\" '
+                f'| sed \'s/^/export /\')" 2>/dev/null; '
+            )
+            path_expr = "$(which spectre 2>/dev/null || echo NOTFOUND)"
+            ver_cmd = "spectre -V"
+
         check_script = (
-            'HOSTNAME=`hostname 2>/dev/null || echo localhost`; export HOSTNAME && '
-            f'export VB_CADENCE_CSHRC={cadence_cshrc} && '
-            # Source Cadence env via csh, then run checks in sh
-            f'eval "$(csh -c \'source {cadence_cshrc}; env\' 2>/dev/null '
-            f'| grep -E \"^(PATH|LM_LICENSE_FILE|CDS)=\" '
-            f'| sed \'s/^/export /\')" 2>/dev/null; '
-            # 1. Which spectre
-            'echo "SPECTRE_PATH=$(which spectre 2>/dev/null || echo NOTFOUND)"; '
-            # 2. Spectre version
-            'spectre -V 2>&1 | head -1; '
-            # 3. lmstat for all features with active users
+            f'{env_setup}'
+            f'echo "SPECTRE_PATH={path_expr}"; '
+            f'{ver_cmd} 2>&1 | head -1; '
             'lmstat -a 2>/dev/null | grep -E "Users of" | grep "licenses in use" | grep -v "0 licenses in use"'
         )
 
@@ -818,7 +842,10 @@ class SpectreSimulator:
                 configured_user=self._remote_user or runner.user,
                 runner=runner,
             )
-            self._remote_work_dir = default_remote_spectre_work_dir(username)
+            self._remote_work_dir = default_remote_spectre_work_dir(
+                username,
+                resolve_client_id(self._profile),
+            )
             logger.info("Remote work dir: %s", self._remote_work_dir)
         if self._remote_work_dir is None:
             return SimulationResult(

@@ -32,15 +32,11 @@ from __future__ import annotations
 import argparse
 import shlex
 import sys
+import time
 from pathlib import Path
 
 from virtuoso_bridge import VirtuosoClient
-from virtuoso_bridge.virtuoso.ops import escape_skill_string
-
-
-def _q(s: str) -> str:
-    """Wrap a Python string as a SKILL string literal."""
-    return f'"{escape_skill_string(s)}"'
+from virtuoso_bridge.virtuoso.ops import q as _q
 
 
 def main() -> int:
@@ -81,6 +77,25 @@ def main() -> int:
     )
     args = parser.parse_args()
 
+    # MSYS / Git Bash path-mangling check.  Git Bash on Windows
+    # rewrites Linux-style /home/... into <msys_root>/home/... before
+    # argv reaches Python — strmin then can't find the file and the
+    # error message points at the *mangled* path, which is confusing.
+    # Detect and bail with a clear pointer to the fix.
+    if args.gds.startswith(("C:/", "C:\\", "D:/", "D:\\")) and "/home/" in args.gds.replace("\\", "/"):
+        unmangled = "/home/" + args.gds.replace("\\", "/").split("/home/", 1)[1]
+        sys.exit(
+            "ERROR: GDS path appears mangled by Git Bash / MSYS / Cygwin.\n"
+            f"  Received:  {args.gds}\n"
+            f"  Expected:  {unmangled}\n"
+            "  Cause:     these shells translate Linux paths like /home/... to "
+            "<msys_root>/home/... before Python sees the argv.\n"
+            "  Fix:       on Windows, run this script from PowerShell, cmd.exe, "
+            "or WSL — NOT Git Bash.\n"
+            "             (Claude Code: prefer the PowerShell tool over Bash for "
+            "this script on Windows hosts.)"
+        )
+
     client = VirtuosoClient.from_env()
 
     # 1. Make sure the target library is registered in cds.lib.
@@ -93,6 +108,41 @@ def main() -> int:
             f"  Add a 'DEFINE {args.target_lib} <path>' line and restart Virtuoso, "
             f"or call ddUpdateLibList() first."
         )
+
+    # 1b. strmin runs in Virtuoso's cwd and resolves the GDS path / refLibList
+    #     file relative to that cwd — NOT to the caller's pwd.  If the user
+    #     pointed at a local file, auto-upload it to the Virtuoso workdir
+    #     and rewrite the arg to the basename.  Without this, the 2026-05-14
+    #     trap returns silently after 600s with strmIn.log saying
+    #     `XSTRM-13: Failed to open input Stream file 'foo.gds'`.
+    r = client.execute_skill('getWorkingDir()')
+    workdir = (r.output or "").strip()
+    if workdir.startswith('"') and workdir.endswith('"'):
+        workdir = workdir[1:-1]
+    workdir = workdir.replace('\\"', '"').replace('\\\\', '\\')
+
+    def _stage(label: str, local_path: str) -> str:
+        """If local_path exists on the caller's filesystem, upload it to
+        Virtuoso's workdir and return the basename.  Absolute remote paths
+        (`/home/...`) and paths that don't exist locally are left untouched
+        — the caller may legitimately be pointing at an already-remote file
+        whose path the local FS can't see."""
+        if not local_path:
+            return local_path
+        p = Path(local_path)
+        if not p.exists():
+            return local_path
+        remote = f"{workdir}/{p.name}"
+        print(f"[stage] {label}: uploading {p} -> {remote}")
+        rr = client.upload_file(str(p), remote)
+        if getattr(rr, "status", None) is not None and str(rr.status).endswith("ERROR"):
+            sys.exit(f"ERROR: failed to upload {label} {p} to {remote}: "
+                     f"{getattr(rr, 'errors', None)}")
+        return p.name
+
+    args.gds = _stage("GDS", args.gds)
+    if args.ref_libs:
+        args.ref_libs = _stage("ref_libs", args.ref_libs)
 
     # 2. Compose the strmin command line.  Use shlex.quote so paths with
     #    spaces or odd chars survive the trip through SKILL's system().
@@ -114,34 +164,119 @@ def main() -> int:
     cmd = " ".join(parts)
 
     print(f"[strmin] {cmd}")
-    r = client.execute_skill(f"system({_q(cmd)})")
-    rc_text = (r.output or "").strip()
-    try:
-        rc = int(rc_text)
-    except ValueError:
-        rc = -1
-    if rc != 0:
-        sys.exit(
-            f"strmin failed (system() returned {rc_text!r}).  "
-            f"Look at strmIn.log in Virtuoso's working directory for details."
-        )
+    # SKILL system() return is unreliable for strmin — observed
+    # 2026-05-13: strmin keeps running on the remote after Python
+    # receives empty / garbled rc, so sequential strmin calls race
+    # on lib state ("library X is not in cds.lib" from the second
+    # call while the first hasn't committed).  Don't trust rc;
+    # poll for the target cellview to appear instead.
+    client.execute_skill(f"system({_q(cmd)})")
 
-    # 3. Refresh Virtuoso's library cache so Library Manager sees the cells.
-    client.execute_skill("ddUpdateLibList()")
-
-    # 4. Verify by counting layout objects in the imported cell.
     cell = args.cell or Path(args.gds).name.split(".")[0]
-    skill = (
-        f"let((cv) "
-        f"  cv=dbOpenCellViewByType({_q(args.target_lib)} {_q(cell)} \"layout\" nil \"r\") "
-        f"  if(cv "
-        f"     sprintf(nil \"instances=%d shapes=%d bbox=%L\" "
-        f"             length(cv~>instances) length(cv~>shapes) cv~>bBox) "
-        f"     \"OPEN_FAILED — different cell name? See strmIn.log.\")) "
+    # ddGetObj-first gate: dbOpenCellViewByType in "r" mode prints
+    # `WARNING (DB-270212)` to CIW each time the view is missing.
+    # During the poll loop that's a CIW warning every 3 s until the
+    # view appears — observed 16+ noise lines per import.  ddGetObj
+    # is silent when the view doesn't exist yet, so use it as a
+    # cheap gate and only open the cv when ddGetObj confirms it.
+    verify_skill = (
+        f"let((vobj cv) "
+        f"  vobj=ddGetObj({_q(args.target_lib)} {_q(cell)} \"layout\") "
+        f"  if(vobj "
+        f"     progn( "
+        f"       cv=dbOpenCellViewByType({_q(args.target_lib)} {_q(cell)} \"layout\" nil \"r\") "
+        f"       if(cv "
+        f"          sprintf(nil \"instances=%d shapes=%d bbox=%L\" "
+        f"                  length(cv~>instances) length(cv~>shapes) cv~>bBox) "
+        f"          nil)) "
+        f"     nil)) "
     )
-    r = client.execute_skill(skill)
-    print(f"[OK] {args.target_lib}/{cell}/layout: {r.output}")
-    return 0
+
+    # strmin always writes `strmIn.log` to Virtuoso's cwd.  Watch it
+    # alongside the cellview poll — when strmin hits a fatal error
+    # (XSTRM-13 missing input, XSTRM-11 bad refLibList, GDS parse
+    # error, etc.) it dies in seconds AND writes
+    # `INFO (XSTRM-273): Translation failed.` to the log.  Without
+    # this, the script polled for the cellview that would never
+    # appear for the full 600s — 10 minutes of pointless wall-clock
+    # observed 2026-05-14.
+    log_path = f"{workdir}/strmIn.log"
+
+    def _scan_strmin_log() -> tuple[str | None, bool]:
+        """Return (fail_reason, completed) — fail_reason is a terminal
+        failure string or None; completed is True once XSTRM-234
+        "Translation completed" appears.
+
+        We MUST wait for the completion marker before reading bbox: on a
+        re-import (same cell name already exists in target lib), the old
+        ``layout.oa`` is present from time 0, so ddGetObj/dbOpenCellView
+        succeed immediately and would report the STALE bbox of the
+        previous import.  Observed 2026-05-14: re-imported a 357×78 µm
+        m4s layout over an existing 221×222 m16s layout; verify ran
+        before strmin finished writing and reported 221×222 instead of
+        the new 357×78.
+
+        ``client.run_shell_command`` only returns a SKILL system() status
+        token (``'t'``) in ``.output`` — NOT the captured stdout.  So we
+        read the log via SKILL ``infile``/``gets`` instead, which routes
+        the content through ``execute_skill``'s normal return channel."""
+        read_skill = (
+            f"let((p line body) "
+            f"  p = infile({_q(log_path)}) "
+            f"  body = \"\" "
+            f"  when(p "
+            f"    while(gets(line p) body = strcat(body line)) "
+            f"    close(p)) "
+            f"  body)"
+        )
+        rr = client.execute_skill(read_skill)
+        body = (rr.output or "").strip()
+        # SKILL-returned strings come wrapped in quotes with \" / \\ escapes.
+        if body.startswith('"') and body.endswith('"'):
+            body = body[1:-1]
+        body = body.replace('\\"', '"').replace('\\n', '\n').replace('\\\\', '\\')
+        if "XSTRM-273" in body and "Translation failed" in body:
+            for ln in body.splitlines():
+                if "ERROR" in ln and "XSTRM" in ln:
+                    return ln.strip(), False
+            return "Translation failed (see strmIn.log for details)", False
+        completed = "XSTRM-234" in body and "Translation completed" in body
+        return None, completed
+
+    timeout_s = 600
+    poll_interval = 3
+    deadline = time.time() + timeout_s
+    next_log = time.time() + 30
+    while True:
+        # Refresh lib list so Library Manager sees newly-written cells.
+        client.execute_skill("ddUpdateLibList()")
+        # Fast-fail on strmin-side failure (don't burn the full timeout).
+        fail, completed = _scan_strmin_log()
+        if fail:
+            sys.exit(
+                f"strmin: {fail}\n"
+                f"  Full log: {log_path}"
+            )
+        # Only query bbox once strmin has actually finished writing —
+        # otherwise on re-import we'd read the stale previous cellview.
+        if completed:
+            r = client.execute_skill(verify_skill)
+            out = (r.output or "").strip().strip('"')
+            if out.startswith("instances="):
+                print(f"[OK] {args.target_lib}/{cell}/layout: {out}")
+                return 0
+        now = time.time()
+        if now >= deadline:
+            sys.exit(
+                f"strmin: {args.target_lib}/{cell}/layout did not appear "
+                f"within {timeout_s}s. Check strmIn.log in Virtuoso's "
+                f"working directory."
+            )
+        if now >= next_log:
+            elapsed = int(now - (deadline - timeout_s))
+            print(f"[wait] {elapsed}s — strmin still running, polling for cellview...")
+            next_log = now + 30
+        time.sleep(poll_interval)
 
 
 if __name__ == "__main__":

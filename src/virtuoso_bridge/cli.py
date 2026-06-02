@@ -80,6 +80,49 @@ def _load_cli_env() -> Path | None:
     return env_path
 
 
+def cli_profile(*, action: str, profile: str | None = None) -> int:
+    """Inspect or edit profile bindings."""
+    from virtuoso_bridge.profile import (
+        bind_venv_profile,
+        clear_venv_profile,
+        read_venv_profile,
+        resolve_profile_info,
+    )
+
+    if action == "bind":
+        if profile is None:
+            print("profile bind requires a profile name")
+            return 2
+        try:
+            path = bind_venv_profile(profile)
+        except Exception as exc:
+            print(f"profile bind failed: {exc}")
+            return 1
+        print(f"Bound current virtualenv to profile {profile!r}")
+        print(f"  {path}")
+        return 0
+
+    if action == "clear":
+        try:
+            path = clear_venv_profile()
+        except Exception as exc:
+            print(f"profile clear failed: {exc}")
+            return 1
+        print("Cleared current virtualenv profile binding")
+        print(f"  {path}")
+        return 0
+
+    info = resolve_profile_info()
+    venv_path, venv_profile = read_venv_profile()
+    print(f"resolved profile : {info.profile or '(default)'}")
+    print(f"source           : {info.source}")
+    if info.path:
+        print(f"source path      : {info.path}")
+    print(f"venv binding     : {venv_profile or '(none)'}")
+    print(f"venv path        : {venv_path or '(no active virtualenv)'}")
+    return 0
+
+
 def _fmt(seconds: float) -> str:
     return f"{seconds:.3f}s"
 
@@ -287,10 +330,27 @@ def _print_load_hint(setup_path: str) -> None:
     print(f"    load(\"{setup_path}\")")
 
 
+def _print_stale_daemon_hint() -> None:
+    """Print recovery guidance for a CIW daemon left from another setup."""
+    print("\n  If CIW says \"already running\", load() did not replace the existing daemon.")
+    print("  To switch profile/port, run in CIW:")
+    print("    RBStop()")
+    print("    load(\".../virtuoso_setup.il\")")
+    print("  If that does not clear it, use RBStopAll() before loading again.")
+
+
+def _print_cross_user_daemon_failure(error: str) -> None:
+    from virtuoso_bridge.daemon_guard import OVERRIDE_ENV
+
+    print("\n[daemon identity] FAILED")
+    print(f"  {error}")
+    print(f"  Set {OVERRIDE_ENV}=1 only if this cross-user connection is intentional.")
+
+
 def _print_status() -> int:
     _load_cli_env()
     profile = _get_cli_profile()
-    from virtuoso_bridge.transport.tunnel import SSHClient, _is_localhost
+    from virtuoso_bridge.transport.tunnel import SSHClient, _is_localhost, _profiled_bridge_leaf
     from virtuoso_bridge.virtuoso.basic.bridge import VirtuosoClient
 
     state = SSHClient.read_state(profile)
@@ -309,6 +369,11 @@ def _print_status() -> int:
 
     # Infer setup_path from user config when state is unavailable
     def _infer_setup_path() -> str | None:
+        from virtuoso_bridge.transport.remote_paths import (
+            default_virtuoso_bridge_dir,
+            resolve_client_id,
+        )
+
         user = configured_user
         if not user:
             import getpass
@@ -316,7 +381,12 @@ def _print_status() -> int:
                 user = getpass.getuser()
             except Exception:
                 return None
-        return f"/tmp/virtuoso_bridge_{user}/virtuoso_bridge/virtuoso_setup.il"
+        work_dir = default_virtuoso_bridge_dir(
+            user,
+            _profiled_bridge_leaf(profile),
+            resolve_client_id(profile),
+        )
+        return f"{work_dir}/virtuoso_setup.il"
 
     if is_local:
         print(f"\n[mode] local (no SSH tunnel)")
@@ -343,6 +413,7 @@ def _print_status() -> int:
 
     # Daemon (Virtuoso CIW)
     # For local mode, check daemon if we have state (don't require 'running')
+    daemon_user_ok = True
     can_check_daemon = (is_local and state) or (running and state)
     if can_check_daemon:
         if state is None:
@@ -354,6 +425,20 @@ def _print_status() -> int:
             ok = vc.test_connection(timeout=5)
             print(f"\n[daemon] {'OK - connected to Virtuoso CIW' if ok else 'NO RESPONSE'}")
             if ok:
+                from virtuoso_bridge.daemon_guard import check_daemon_user
+
+                try:
+                    user_check = check_daemon_user(vc, profile=profile, timeout=5)
+                    if user_check.daemon_user:
+                        print(f"  daemon user: {user_check.daemon_user}")
+                    if user_check.expected_user:
+                        print(f"  tunnel user: {user_check.expected_user}")
+                    if not user_check.ok:
+                        daemon_user_ok = False
+                        _print_cross_user_daemon_failure(user_check.error)
+                except Exception as exc:
+                    print(f"  daemon user: unavailable ({exc})")
+
                 # Query Virtuoso environment info
                 for skill_expr, label in [
                     ('getHostName()', 'hostname'),
@@ -376,6 +461,7 @@ def _print_status() -> int:
                 )
             if not ok and setup_path:
                 _print_load_hint(setup_path)
+                _print_stale_daemon_hint()
         except Exception as e:
             print(f"\n[daemon] error: {e}")
     elif not is_local and not running:
@@ -389,8 +475,8 @@ def _print_status() -> int:
 
     print("\n========================================================================")
     if is_local:
-        return 0  # local mode: no tunnel to check
-    return 0 if running else 1
+        return 0 if daemon_user_ok else 1
+    return 0 if running and daemon_user_ok else 1
 
 
 def _print_spectre_status(profile: str | None, suffix: str) -> None:
@@ -413,12 +499,16 @@ def _print_spectre_status(profile: str | None, suffix: str) -> None:
 
     if is_local:
         try:
-            spectre_path = shutil.which("spectre")
+            spectre_bin = (
+                os.getenv(f"VB_SPECTRE_BIN{suffix}", "").strip()
+                or os.getenv("VB_SPECTRE_BIN", "").strip()
+            )
+            spectre_path = spectre_bin or shutil.which("spectre")
             version = None
             if spectre_path:
                 try:
                     result = subprocess.run(
-                        ["spectre", "-V"],
+                        [spectre_path, "-V"],
                         capture_output=True, text=True, timeout=10,
                     )
                     for line in (result.stdout + result.stderr).splitlines():
@@ -447,6 +537,29 @@ def _print_spectre_status(profile: str | None, suffix: str) -> None:
             print("\n[spectre] local mode (no SSH runner)")
             return
         runner._verbose = False
+
+        spectre_bin = (
+            os.getenv(f"VB_SPECTRE_BIN{suffix}", "").strip()
+            or os.getenv("VB_SPECTRE_BIN", "").strip()
+        )
+
+        if spectre_bin:
+            # Explicit binary path — skip auto-detection.
+            quoted = shlex.quote(spectre_bin)
+            check_cmd = f"{quoted} -V 2>&1 | head -1"
+            print("\n[spectre] probing...", flush=True)
+            result = runner.run_command(check_cmd, timeout=60)
+            stdout = result.stdout.strip()
+            version = None
+            for line in stdout.splitlines():
+                if line.strip().startswith("@(#)$CDS:"):
+                    version = line.strip()
+                    break
+            print("[spectre] OK")
+            print(f"  path    : {spectre_bin}")
+            if version:
+                print(f"  version : {version}")
+            return
 
         # Two detection strategies, fused into a single SSH handshake:
         #
@@ -489,7 +602,7 @@ def _print_spectre_status(profile: str | None, suffix: str) -> None:
             combined = f"{{ {fast}; }} || {{ {slow}; }}"
         else:
             combined = fast
-        check_cmd = f"bash -c {shlex.quote(combined)}"
+        check_cmd = f"bash -l -c {shlex.quote(combined)}"
         print("\n[spectre] probing...", flush=True)
         result = runner.run_command(check_cmd, timeout=60)
         stdout = result.stdout.strip()
@@ -504,12 +617,12 @@ def _print_spectre_status(profile: str | None, suffix: str) -> None:
                 spectre_path = line
 
         if spectre_path:
-            print(f"[spectre] OK")
+            print("[spectre] OK")
             print(f"  path    : {spectre_path}")
             if version:
                 print(f"  version : {version}")
         else:
-            print(f"[spectre] NOT FOUND")
+            print("[spectre] NOT FOUND")
     except Exception as e:
         print(f"[spectre] error: {e}")
     finally:
@@ -631,44 +744,183 @@ def _make_ssh_runner() -> tuple["SSHRunner", str]:
                      jump_host=jump_host, jump_user=jump_user), remote_user
 
 
-def cli_load(*, file: str, timeout: int = 60, quiet: bool = False) -> int:
-    """Execute a SKILL .il file in the running Virtuoso session.
+def _lint_guard_blocks(code_or_path: str, *, is_file: bool, label: str) -> bool:
+    """Run Layer-1 structural lint; report to stderr. True => block the send.
 
-    The daemon already wraps multi-line SKILL into a temp file + load()
-    + capture-last-expression dance internally (see
-    ``ramic_bridge_daemon_3.py``), so we just hand it the file content
-    as a single ``execute_skill`` call.  No upload step needed even in
-    SSH mode.
-
-    Returns: 0 on success, 1 on SKILL-side error, 2 on missing file.
+    Only error-severity findings block; warnings are advisory and pass.
     """
     import sys
-    from pathlib import Path
-    from virtuoso_bridge import VirtuosoClient
+    from virtuoso_bridge.virtuoso.skill_lint import lint_file, lint_text
 
-    # Check file before loading env -- missing/empty file is a frequent
-    # user-side typo; failing fast avoids the "using .env: ..." print
-    # before the actual error.
+    report = lint_file(code_or_path) if is_file else lint_text(code_or_path)
+    if report.errors:
+        print(report.format(), file=sys.stderr)
+        print(f"ERROR: --lint found structural errors; not {label}. "
+              "Re-run without --lint to send anyway.", file=sys.stderr)
+        return True
+    return False
+
+
+def cli_load(*, file: str, timeout: int = 60, quiet: bool = False,
+             lint: bool = False) -> int:
+    """Execute a SKILL .il file in the running Virtuoso session.
+
+    Equivalent to ``load("<file>")`` typed in the CIW: SKILL reads the
+    original file directly, so error messages keep the **original file
+    path + line numbers** (no temp-wrapper pollution).  In SSH mode
+    the file is uploaded first; in local mode the path is forwarded
+    as-is.  Both paths land in :meth:`VirtuosoClient.load_il`.
+
+    Output: the full ``VirtuosoResult`` serialised as JSON on stdout
+    (status, output, errors, warnings, execution_time, metadata).
+    Designed for VS Code tasks / code-runner / wrapper scripts to
+    consume without re-parsing terminal text.  ``--quiet`` suppresses
+    the JSON; only the exit code remains.
+
+    Returns: 0 on SUCCESS, 1 on SKILL-side error, 2 on missing local
+    file.
+    """
+    import json
+    import sys
+    from pathlib import Path
+
+    import virtuoso_bridge as _vb_pkg
+    from virtuoso_bridge.models import ExecutionStatus
+
+    # Missing file is a common user typo (often from VS Code tasks
+    # passing an unsaved/renamed buffer).  Fail fast before loading env
+    # so the error message isn't preceded by a "using .env: ..." line.
     p = Path(file)
     if not p.is_file():
         print(f"ERROR: file not found: {p}", file=sys.stderr)
         return 2
-    skill_code = p.read_text(encoding="utf-8")
-    if not skill_code.strip():
-        print(f"ERROR: file is empty: {p}", file=sys.stderr)
-        return 2
 
-    _load_cli_env()
-    client = VirtuosoClient.from_env(profile=_get_cli_profile())
-    result = client.execute_skill(skill_code, timeout=timeout)
-
-    if result.errors:
-        for err in result.errors:
-            print(f"SKILL error: {err}", file=sys.stderr)
+    # Optional pre-send guard: catch structural breakage offline before it
+    # round-trips to Virtuoso (where errors are cryptic).  Findings go to
+    # stderr so stdout stays a clean VirtuosoResult JSON contract.
+    if lint and _lint_guard_blocks(str(p), is_file=True, label="loading"):
         return 1
 
-    if not quiet and result.output:
-        print(result.output)
+    _load_cli_env()
+    client = _vb_pkg.VirtuosoClient.from_env(profile=_get_cli_profile())
+    result = client.load_il(p, timeout=timeout)
+
+    if not quiet:
+        # Stable contract: dump the VirtuosoResult exactly as the model
+        # defines it.  Consumers (VS Code task output, scripts) should
+        # rely on these field names rather than scraping prose.
+        print(json.dumps(
+            result.model_dump(mode="json"),
+            indent=2, ensure_ascii=False, default=str,
+        ))
+
+    return 0 if result.status == ExecutionStatus.SUCCESS else 1
+
+
+def cli_eval(*, skill: str | None, stdin: bool, timeout: int = 60,
+             quiet: bool = False, lint: bool = False) -> int:
+    """Execute a SKILL expression in the running Virtuoso session.
+
+    Companion to :func:`cli_load` for one-liners and round-trip checks
+    where wrapping the snippet in a temp ``.il`` file would be friction.
+    Source the SKILL from argv (``virtuoso-bridge eval 'getCurrentTime()'``)
+    or from stdin (``echo 'expr' | virtuoso-bridge eval --stdin``); the
+    latter sidesteps shell-quoting pain for snippets full of ``"``,
+    parens, and quoted symbols.
+
+    Output: same JSON shape as :func:`cli_load` so consumers don't need
+    to branch on which command produced the result.
+
+    Returns: 0 on SUCCESS, 1 on SKILL-side error, 2 on input misuse
+    (no SKILL provided, or both argv and ``--stdin`` given).
+    """
+    import json
+    import sys
+
+    import virtuoso_bridge as _vb_pkg
+    from virtuoso_bridge.models import ExecutionStatus
+
+    if stdin and skill is not None:
+        print("ERROR: pass SKILL via argv OR --stdin, not both",
+              file=sys.stderr)
+        return 2
+    if stdin:
+        skill = sys.stdin.read()
+    if skill is None or not skill.strip():
+        print("ERROR: empty SKILL expression", file=sys.stderr)
+        return 2
+
+    # Optional pre-send guard: lint the *raw* snippet (before the progn
+    # wrap, which would balance parens of its own) and refuse to send on
+    # structural errors.
+    if lint and _lint_guard_blocks(skill, is_file=False, label="evaluating"):
+        return 1
+
+    # Wrap in progn(...) on its own lines so that:
+    #   * multi-statement inputs (`printf(...) "ret"`) work without the
+    #     user adding progn themselves -- the daemon's single-line path
+    #     does `let(((__vb_r <code>)) ...)` which only takes one form;
+    #   * trailing `; comment` doesn't swallow the closing paren --
+    #     the wrapping newline before `)` terminates the line comment;
+    #   * embedded newlines (heredoc / multi-line input) flow through
+    #     unchanged.
+    # The newlines also force the daemon onto its multi-line code path
+    # (temp-file + load), which handles `progn` reliably.
+    wrapped = f"progn(\n{skill}\n)"
+
+    _load_cli_env()
+    client = _vb_pkg.VirtuosoClient.from_env(profile=_get_cli_profile())
+    result = client.execute_skill(wrapped, timeout=timeout)
+
+    if not quiet:
+        print(json.dumps(
+            result.model_dump(mode="json"),
+            indent=2, ensure_ascii=False, default=str,
+        ))
+
+    return 0 if result.status == ExecutionStatus.SUCCESS else 1
+
+
+def cli_lint(*, file: str, deep: bool = False, json_output: bool = False,
+             strict: bool = False, timeout: int = 60) -> int:
+    """Lint a SKILL .il file before it is loaded into Virtuoso.
+
+    Layer 1 (default) is a pure-Python structural check — balanced parens,
+    terminated strings/comments — that needs no running Virtuoso.  With
+    ``--deep`` the file is additionally routed through Cadence ``sklint``
+    on the live daemon for semantic checks; if no daemon is reachable the
+    deep pass is skipped with a note and Layer 1 findings still stand.
+
+    Returns: 0 when clean, 1 on error-severity findings (or any finding
+    with ``--strict``), 2 on a missing local file.
+    """
+    import json
+    import sys
+    from pathlib import Path
+
+    p = Path(file)
+    if not p.is_file():
+        print(f"ERROR: file not found: {p}", file=sys.stderr)
+        return 2
+
+    if deep:
+        import virtuoso_bridge as _vb_pkg
+        _load_cli_env()
+        client = _vb_pkg.VirtuosoClient.from_env(profile=_get_cli_profile())
+        report = client.lint_il(p, deep=True, timeout=timeout)
+    else:
+        from virtuoso_bridge.virtuoso.skill_lint import lint_file
+        report = lint_file(p)
+
+    if json_output:
+        print(json.dumps(report.to_dict(), indent=2, ensure_ascii=False))
+    else:
+        print(report.format())
+
+    if report.errors:
+        return 1
+    if strict and report.warnings:
+        return 1
     return 0
 
 
@@ -678,7 +930,7 @@ def cli_dismiss_dialog() -> int:
     from virtuoso_bridge.virtuoso import x11
     runner, user = _make_ssh_runner()
 
-    dialogs = x11.dismiss_dialogs(runner, user)
+    dialogs = x11.dismiss_dialogs(runner, user, profile=_get_cli_profile())
     if not dialogs:
         print("No dialog windows found.")
         return 0
@@ -716,6 +968,66 @@ _EXPORT_VISIO_OPTS: dict = {
     "include_body_pins": False,
     "hidden":            False,
 }
+
+
+def cli_find(*, query: str | None, mode: str, limit: int, include_desc: bool, json_output: bool) -> int:
+    """Search SKILL API documentation from Cadence .fnd files.
+
+    On first run for a given server, downloads the SKILL Finder database
+    (~tens of MB) to a local cache.  Subsequent runs use the cache.
+    """
+    import json as _json
+    import sys
+
+    _load_cli_env()
+    from virtuoso_bridge import VirtuosoClient
+    from virtuoso_bridge.virtuoso.skill_finder import SKILLFinder
+
+    client = VirtuosoClient.from_env(profile=_get_cli_profile())
+
+    if not query:
+        print("Error: query argument required for 'skill-find'", file=sys.stderr)
+        return 1
+
+    results = client.find_skill(query or "", mode=mode, limit=limit, include_desc=include_desc)
+
+    if not query:
+        print("Error: query argument required for 'skill-find'", file=sys.stderr)
+        return 1
+
+    if json_output:
+        print(_json.dumps(results, indent=2, ensure_ascii=False))
+    else:
+        finder = SKILLFinder()
+        from virtuoso_bridge.virtuoso.skill_finder.parser import SkillEntry
+        entries = [SkillEntry(**r) for r in results]
+        print(finder.format_results(entries, query or ""))
+
+    return 0
+
+
+def cli_skill_info(*, func_name: str, json_output: bool) -> int:
+    """Get More Info documentation for a specific SKILL function."""
+    import json as _json
+
+    _load_cli_env()
+    from virtuoso_bridge import VirtuosoClient
+
+    client = VirtuosoClient.from_env(profile=_get_cli_profile())
+    result = client.get_skill_more_info(func_name)
+
+    if json_output:
+        print(_json.dumps(result, indent=2, ensure_ascii=False))
+    else:
+        if result is None:
+            print(f"No More Info found for: {func_name}")
+            return 1
+        print(f"More Info — {result['func_name']}")
+        print(f"  Source  : {result['file_path']}")
+        print(f"  Topic   : {result['topic'] or '(whole file)'}")
+        print()
+        print(result["plain_text"])
+    return 0
 
 
 def cli_windows() -> int:
@@ -980,14 +1292,38 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Connection profile (reads VB_*_<profile> env vars)")
         sp.add_argument("--env", default=None,
                         help="Explicit .env file path (highest priority)")
+        if name == "start":
+            sp.add_argument("--bind-venv", action="store_true",
+                            help="Bind the active virtualenv to this -p profile before starting")
+
+    sp_profile = subparsers.add_parser("profile", help="Show or edit profile bindings")
+    profile_sub = sp_profile.add_subparsers(dest="profile_action", required=True)
+    sp_profile_show = profile_sub.add_parser("show", help="Show resolved profile")
+    sp_profile_show.add_argument("--env", default=None,
+                                 help="Explicit .env file path (highest priority)")
+    sp_profile_bind = profile_sub.add_parser("bind", help="Bind current virtualenv to a profile")
+    sp_profile_bind.add_argument("profile", help="Profile name to bind")
+    sp_profile_bind.add_argument("--venv", action="store_true",
+                                 help="Bind the current virtualenv (the only supported scope)")
+    sp_profile_bind.add_argument("--env", default=None,
+                                 help="Explicit .env file path (highest priority)")
+    sp_profile_clear = profile_sub.add_parser("clear", help="Clear current virtualenv profile binding")
+    sp_profile_clear.add_argument("--venv", action="store_true",
+                                  help="Clear the current virtualenv binding (the only supported scope)")
+    sp_profile_clear.add_argument("--env", default=None,
+                                  help="Explicit .env file path (highest priority)")
+
     sp_load = subparsers.add_parser(
         "load",
         help="Execute a SKILL .il file in the running Virtuoso session",
         description=(
-            "Reads the file's contents and runs them as a single SKILL "
-            "block in the daemon's CIW; prints the value of the last "
-            "expression on stdout, errors on stderr.  Useful as a 'Run "
-            "File' target from VSCode (.vscode/tasks.json):\n"
+            "Equivalent to typing `load(\"<file>\")` in the CIW.  SKILL\n"
+            "reads the original file, so any error keeps the original\n"
+            "file path + line number (no temp-wrapper pollution).  In\n"
+            "SSH mode the file is uploaded automatically.\n\n"
+            "Output: full VirtuosoResult as JSON on stdout (status,\n"
+            "output, errors, warnings, execution_time, metadata).\n\n"
+            "VSCode .vscode/tasks.json snippet:\n"
             '  { "label": "Load SKILL", "type": "shell",\n'
             '    "command": "virtuoso-bridge load \\"${file}\\"" }'
         ),
@@ -1001,7 +1337,81 @@ def build_parser() -> argparse.ArgumentParser:
     sp_load.add_argument("--timeout", type=int, default=60,
                          help="SKILL execution timeout in seconds (default: 60)")
     sp_load.add_argument("--quiet", action="store_true",
-                         help="Suppress printing the SKILL return value")
+                         help="Suppress JSON output; only the exit code is reported")
+    sp_load.add_argument("--lint", action="store_true",
+                         help="Structural-lint the file first; abort on errors before loading")
+
+    sp_eval = subparsers.add_parser(
+        "eval",
+        help="Execute a SKILL expression (one-liner) in the running Virtuoso session",
+        description=(
+            "Run an inline SKILL expression — companion to `load` for\n"
+            "one-liners and round-trip checks.\n\n"
+            "Two input modes:\n"
+            "  virtuoso-bridge eval 'getCurrentTime()'\n"
+            "  echo 'printf(\"hi\\n\")' | virtuoso-bridge eval --stdin\n\n"
+            "--stdin sidesteps shell quoting for snippets with embedded\n"
+            "quotes, parens, or quoted symbols, and is the natural way\n"
+            "to feed multi-line SKILL via heredoc.\n\n"
+            "Multi-statement input is supported transparently — the\n"
+            "expression is wrapped in `progn(...)` before sending, and\n"
+            "the value of the last form is returned.\n\n"
+            "Output: full VirtuosoResult as JSON on stdout (same shape\n"
+            "as `load`)."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    sp_eval.add_argument("skill", nargs="?", default=None,
+                         help="SKILL expression to evaluate (omit when using --stdin)")
+    sp_eval.add_argument("--stdin", action="store_true",
+                         help="Read the SKILL expression from stdin instead of argv")
+    sp_eval.add_argument("-p", "--profile", default=None,
+                         help="Connection profile (reads VB_*_<profile> env vars)")
+    sp_eval.add_argument("--env", default=None,
+                         help="Explicit .env file path (highest priority)")
+    sp_eval.add_argument("--timeout", type=int, default=60,
+                         help="SKILL execution timeout in seconds (default: 60)")
+    sp_eval.add_argument("--quiet", action="store_true",
+                         help="Suppress JSON output; only the exit code is reported")
+    sp_eval.add_argument("--lint", action="store_true",
+                         help="Structural-lint the snippet first; abort on errors before evaluating")
+
+    sp_lint = subparsers.add_parser(
+        "lint",
+        help="Lint a SKILL .il file before loading it into Virtuoso",
+        description=(
+            "Two-layer SKILL lint.\n\n"
+            "Layer 1 (default, offline): pure-Python structural check —\n"
+            "balanced parentheses (incl. the super-bracket ']'), terminated\n"
+            "string literals and block comments.  Needs no running Virtuoso\n"
+            "and catches the mistakes that produce the most cryptic CIW\n"
+            "errors, before the code is ever sent.\n\n"
+            "Layer 2 (--deep): also runs Cadence `sklint` via the native\n"
+            "standalone `skill` interpreter on the host (located like SKILL\n"
+            "Finder: sibling of the `virtuoso` binary) for semantic checks —\n"
+            "undefined variables, suspicious usage, style.  Needs only SSH +\n"
+            "a Cadence install (no running Virtuoso); skipped with a note if\n"
+            "no interpreter is reachable.\n\n"
+            "Examples:\n"
+            "  virtuoso-bridge lint myscript.il\n"
+            "  virtuoso-bridge lint myscript.il --deep\n"
+            "  virtuoso-bridge lint myscript.il --json"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    sp_lint.add_argument("file", help="Path to the .il file to lint")
+    sp_lint.add_argument("--deep", action="store_true",
+                         help="Also run Cadence sklint via the native skill interpreter (SSH + Cadence install)")
+    sp_lint.add_argument("--strict", action="store_true",
+                         help="Exit non-zero on warnings too, not just errors")
+    sp_lint.add_argument("--json", action="store_true",
+                         help="Output the lint report as JSON")
+    sp_lint.add_argument("-p", "--profile", default=None,
+                         help="Connection profile (only used with --deep)")
+    sp_lint.add_argument("--env", default=None,
+                         help="Explicit .env file path (highest priority)")
+    sp_lint.add_argument("--timeout", type=int, default=60,
+                         help="sklint execution timeout in seconds (default: 60)")
 
     sp_dismiss = subparsers.add_parser(
         "dismiss-dialog", help="Find and dismiss blocking Virtuoso GUI dialogs")
@@ -1019,6 +1429,59 @@ def build_parser() -> argparse.ArgumentParser:
                                help="Connection profile")
     sp_screenshot.add_argument("--env", default=None,
                                help="Explicit .env file path (highest priority)")
+
+    sp_skill_find = subparsers.add_parser(
+        "skill-find",
+        help="Search SKILL API documentation from Cadence .fnd files",
+        description=(
+            "Queries the Cadence SKILL Finder database (``doc/finder/SKILL/*.fnd``)"
+            " on the remote server.  On first run the database is downloaded to a local\n"
+            "cache (``~/.cache/virtuoso_bridge/skill_finder/<host>/``);\n"
+            "subsequent runs use the cache without additional network traffic.\n\n"
+            "Search modes:\n"
+            "  fuzzy   case-insensitive substring match (default)\n"
+            "  prefix  name starts with query\n"
+            "  suffix  name ends with query\n"
+            "  exact   exact name match\n"
+            "  regex   Python regular expression match\n\n"
+            "Examples:\n"
+            "  virtuoso-bridge skill-find dbOpen\n"
+            '  virtuoso-bridge skill-find dbOpen --mode prefix\n'
+            '  virtuoso-bridge skill-find "^db.*" --mode regex\n'
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    sp_skill_find.add_argument("query", nargs="?", default=None,
+                          help="Search string or pattern (required unless --json is set)")
+    sp_skill_find.add_argument("-m", "--mode", default="fuzzy",
+                          choices=["fuzzy", "prefix", "suffix", "exact", "regex"],
+                          help="Search mode (default: fuzzy)")
+    sp_skill_find.add_argument("-n", "--limit", type=int, default=50,
+                          help="Maximum results to return (default: 50)")
+    sp_skill_find.add_argument("--include-desc", action="store_true",
+                          help="Also search in the description field")
+    sp_skill_find.add_argument("--json", action="store_true",
+                          help="Output results as JSON")
+    sp_skill_find.add_argument("-p", "--profile", default=None,
+                          help="Connection profile")
+    sp_skill_find.add_argument("--env", default=None,
+                          help="Explicit .env file path (highest priority)")
+
+    sp_skill_info = subparsers.add_parser(
+        "skill-info",
+        help="Get More Info documentation for a SKILL function",
+        description=(
+            "Retrieves the More Info documentation for a specific SKILL function.\n"
+            "The More Info system provides detailed HTML documentation for Cadence\n"
+            "SKILL functions, indexed in ``doc/api_more_info/api_more_info.tgf``."
+        ),
+    )
+    sp_skill_info.add_argument("func_name", help="SKILL function name to look up")
+    sp_skill_info.add_argument(
+        "--json", action="store_true", help="Output results as JSON"
+    )
+    sp_skill_info.add_argument("-p", "--profile", default=None, help="Connection profile")
+    sp_skill_info.add_argument("--env", default=None, help="Explicit .env file path (highest priority)")
 
     sp_windows = subparsers.add_parser("windows", help="List all open Virtuoso windows")
     sp_windows.add_argument("-p", "--profile", default=None,
@@ -1098,11 +1561,30 @@ def main(argv: list[str] | None = None) -> int:
     _make_stdio_safe()
     parser = build_parser()
     args = parser.parse_args(argv)
+    _CLI_PROFILE[0] = None
+    set_runtime_env_file(getattr(args, "env", None))
+    if getattr(args, "bind_venv", False):
+        profile_arg = getattr(args, "profile", None)
+        if not profile_arg:
+            parser.error("--bind-venv requires -p/--profile")
+        from virtuoso_bridge.profile import bind_venv_profile
+        try:
+            bind_venv_profile(profile_arg)
+        except Exception as exc:
+            parser.error(str(exc))
+    from virtuoso_bridge.profile import resolve_profile
+    profile = resolve_profile(getattr(args, "profile", None))
+    if profile is not None:
+        _CLI_PROFILE[0] = profile
     dispatch = {
         "init": lambda: cli_init(
             remote=getattr(args, "remote", None),
             jump=getattr(args, "jump", None),
             force=getattr(args, "force", False),
+        ),
+        "profile": lambda: cli_profile(
+            action=getattr(args, "profile_action"),
+            profile=getattr(args, "profile", None),
         ),
         "start": cli_start,
         "stop": cli_stop,
@@ -1113,18 +1595,39 @@ def main(argv: list[str] | None = None) -> int:
             file=getattr(args, "file"),
             timeout=getattr(args, "timeout", 60),
             quiet=getattr(args, "quiet", False),
+            lint=getattr(args, "lint", False),
+        ),
+        "eval": lambda: cli_eval(
+            skill=getattr(args, "skill", None),
+            stdin=getattr(args, "stdin", False),
+            timeout=getattr(args, "timeout", 60),
+            quiet=getattr(args, "quiet", False),
+            lint=getattr(args, "lint", False),
+        ),
+        "lint": lambda: cli_lint(
+            file=getattr(args, "file"),
+            deep=getattr(args, "deep", False),
+            json_output=getattr(args, "json", False),
+            strict=getattr(args, "strict", False),
+            timeout=getattr(args, "timeout", 60),
         ),
         "dismiss-dialog": cli_dismiss_dialog,
         "screenshot": cli_screenshot,
         "windows": cli_windows,
         "snapshot": cli_snapshot,
         "export-visio": cli_export_visio,
+        "skill-find": lambda: cli_find(
+            query=getattr(args, "query", None),
+            mode=getattr(args, "mode", "fuzzy"),
+            limit=getattr(args, "limit", 50),
+            include_desc=getattr(args, "include_desc", False),
+            json_output=getattr(args, "json", False),
+        ),
+        "skill-info": lambda: cli_skill_info(
+            func_name=getattr(args, "func_name", None) or "",
+            json_output=getattr(args, "json", False),
+        ),
     }
-    # Pass profile to commands that support it
-    profile = getattr(args, "profile", None)
-    if profile is not None:
-        _CLI_PROFILE[0] = profile
-    set_runtime_env_file(getattr(args, "env", None))
     screenshot_target = getattr(args, "target", None)
     if screenshot_target is not None:
         _SCREENSHOT_TARGET[0] = screenshot_target

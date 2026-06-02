@@ -221,24 +221,6 @@ def main() -> int:
         encoding="utf-8",
     )
 
-    # Stars badge -- self-hosted to insulate the README from
-    # img.shields.io <-> GitHub-API transient failures that GitHub camo
-    # then caches.  Pulls /repos/{o}/{r} once and writes a shields-
-    # endpoint JSON to stats/stars-badge.json.  Failure here is non-
-    # fatal: traffic data is more important and already saved above.
-    try:
-        repo_meta = _get(f"{API_BASE}/repos/{owner}/{repo}", token)
-        stars_total = int(repo_meta.get("stargazers_count", 0))
-        (STATS_DIR / "stars-badge.json").write_text(
-            json.dumps(_badge("stars", stars_total, "f5c542")) + "\n",
-            encoding="utf-8",
-        )
-        print(f"stars tracked: {stars_total}")
-    except urllib.error.HTTPError as exc:
-        body = exc.read().decode("utf-8", errors="replace")[:200]
-        print(f"GitHub API error fetching stars {exc.code}: {body}",
-              file=sys.stderr)
-
     print(f"clones tracked: {len(clones)} day(s)")
     print(f"views  tracked: {len(views)} day(s)")
     return 0

@@ -63,6 +63,27 @@ client.execute_skill(layout_delete_cell(lib, cell))
 - **Labels on metal**: anchor directly on the metal shape, not beside it
 - **Screenshot after edits**: visually verify geometry, don't trust coordinates alone
 
+## Display / Level-of-Detail (LoD) gotcha
+
+Cadence's layout viewer culls shapes that would render below a screen-pixel threshold (~3 px). At fit-zoom of a large cell, **small rects render as nothing** — even though they're physically present.
+
+**Diagnose:** the data is on disk but the canvas is empty.
+```scheme
+; this should report a non-empty bbox and shape count
+let((cv) cv = dbOpenCellViewByType(LIB CELL "layout" "maskLayout" "r")
+  sprintf(nil "shapes=%d bb=%L sample=%L"
+          length(cv~>shapes) cv~>bBox (car(cv~>shapes))~>bBox))
+```
+If shapes are there but the GUI is blank, it's LoD culling.
+
+**Workarounds:**
+- **Zoom in**: enlarge the visible μm range until each shape spans ≥ 3 screen pixels. For a 600 px wide canvas viewing 200 μm, each μm is ~3 px → 1 μm rects render fine. At 700 μm in the same canvas (~1 μm/px), a 2 μm rect is right at the threshold.
+- **Resize the window**: a 1700 px canvas turns the same zoom into ~2.4 μm/px → 2 μm rects become 5 px and survive culling.
+- **`envSetVal("layout" "drawTinyObjects" 'boolean t)`** — disables LoD culling (slower redraw but every shape draws).
+- **Export instead of screenshot**: print-path renderers (`lePlotImage`, `axlSaveDisplayResource`) bypass LoD and draw every shape regardless of size.
+
+**Probe trick** — if you suspect LoD, drop a single 200 μm × 200 μm rect on the same layer/purpose, screenshot, and confirm the probe is visible while the small shapes are not. We used this to confirm AP-drawing renders fine; only the 2 μm beads were being culled.
+
 ## See also
 
 - `references/layout-python-api.md` — Python API reference
